@@ -476,7 +476,11 @@ function buildGraph(st, lines, peak, rideMul) {
   const S = st.length;
   const adj = []; for (let i = 0; i < S; i++) adj.push([]);
   // 近くの駅・バス停どうしは歩いて乗り換えられる（300m以内）
-  for (let a = 0; a < S; a++) for (let b = a + 1; b < S; b++) {
+  // 約300m四方の格子に分けて、隣の格子どうしだけ調べる
+  const WG = new Map(), gk = (x, y) => x + ':' + y, gx = s => Math.floor(s.lng / 0.0033), gy = s => Math.floor(s.lat / 0.0027);
+  st.forEach((s, i) => { const k = gk(gx(s), gy(s)); let a = WG.get(k); if (!a) WG.set(k, a = []); a.push(i); });
+  for (let a = 0; a < S; a++) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const b of WG.get(gk(gx(st[a]) + dx, gy(st[a]) + dy)) || []) {
+    if (b <= a) continue;
     const d = distKm({ lat: st[a].lat, lon: st[a].lng }, { lat: st[b].lat, lon: st[b].lng }) * 1000;
     if (d > 300) continue;
     const t = d * P.walkDetour / P.walkSpeed + 1;
@@ -527,21 +531,53 @@ function dijkstraFrom(adj, s) {
   }
   return { dist, km, bk, nb, sur, nbt, pe, pn };
 }
-function allPairs(adj, S) {
-  const T = new Float64Array(S * S).fill(Infinity), SUR = new Float64Array(S * S), NBT = new Uint8Array(S * S), K = new Float64Array(S * S * NC), BK = new Float64Array(S * S * NC), NBk = new Uint8Array(S * S * NC), RAIL = new Uint8Array(S * S);
-  const preds = [];
+// 全駅間の最短経路。グラフを配列（CSR）に詰め直し、作業用の配列は使い回して速くする
+function allPairs(adj, S, fares) {
+  const N = adj.length;
+  let M = 0; for (const a of adj) M += a.length;
+  const off = new Int32Array(N + 1), eTo = new Int32Array(M), eFrom = new Int32Array(M), eT = new Float64Array(M), eK = new Uint8Array(M), eCo = new Uint8Array(M), eBus = new Uint8Array(M), eKm = new Float64Array(M), eBkm = new Float64Array(M), eSur = new Float64Array(M), E = new Array(M);
+  let m = 0;
+  for (let u = 0; u < N; u++) { off[u] = m; for (const e of adj[u]) { E[m] = e; eTo[m] = e.to; eFrom[m] = u; eT[m] = e.t; eK[m] = e.k; eCo[m] = e.co || 0; eBus[m] = e.bus ? 1 : 0; eKm[m] = e.km || 0; eBkm[m] = e.bkm || 0; eSur[m] = e.sur || 0; m++; } }
+  off[N] = m;
+  const SS = S * S;
+  const T = new Float64Array(SS).fill(Infinity), SUR = new Float64Array(SS), NBT = new Uint8Array(SS), K = new Float64Array(SS * NC), BK = new Float64Array(SS * NC), NBk = new Uint8Array(SS * NC), RAIL = new Uint8Array(SS), FN = new Float64Array(SS);
+  const PE = new Int32Array(S * N); // 出発駅ごとの「直前の辺」
+  const dist = new Float64Array(N), nbt = new Uint8Array(N), sur = new Float64Array(N), km = new Float64Array(N * NC), bk = new Float64Array(N * NC), nb = new Uint8Array(N * NC);
+  const cap = M + N + 1, hk = new Float64Array(cap), hv = new Int32Array(cap);
   for (let s = 0; s < S; s++) {
-    const r = dijkstraFrom(adj, s);
-    for (let t = 0; t < S; t++) {
-      if (t === s || r.dist[t] === Infinity) continue;
-      let any = false, rail = false;
-      for (let c = 0; c < NC; c++) { const k = r.km[t * NC + c], n = r.nb[t * NC + c]; K[(s * S + t) * NC + c] = k; BK[(s * S + t) * NC + c] = r.bk[t * NC + c]; NBk[(s * S + t) * NC + c] = n; if (k > 0) { any = rail = true; } if (n > 0) any = true; }
-      if (!any) continue; // 歩いて乗り換えるだけの経路は除く
-      T[s * S + t] = r.dist[t] - P.board; RAIL[s * S + t] = rail ? 1 : 0; SUR[s * S + t] = r.sur[t]; NBT[s * S + t] = r.nbt[t];
+    dist.fill(Infinity); const pe = PE.subarray(s * N, s * N + N); pe.fill(-1);
+    dist[s] = 0; nbt[s] = 0; sur[s] = 0; for (let c = 0; c < NC; c++) { km[s * NC + c] = 0; bk[s * NC + c] = 0; nb[s * NC + c] = 0; }
+    let hn = 0; hk[0] = 0; hv[0] = s; hn = 1;
+    while (hn) {
+      const d = hk[0], u = hv[0];
+      // 取り出し（二分ヒープ）
+      hn--; if (hn) { const lk = hk[hn], lv = hv[hn]; let i = 0; for (;;) { const l = 2 * i + 1; if (l >= hn) break; const r = l + 1, c = (r < hn && hk[r] < hk[l]) ? r : l; if (hk[c] >= lk) break; hk[i] = hk[c]; hv[i] = hv[c]; i = c; } hk[i] = lk; hv[i] = lv; }
+      if (d > dist[u]) continue;
+      for (let x = off[u], xe = off[u + 1]; x < xe; x++) {
+        const v = eTo[x], nd = d + eT[x];
+        if (nd < dist[v] - 1e-9) {
+          dist[v] = nd; pe[v] = x; const k = eK[x];
+          sur[v] = sur[u] + (k === 1 ? eSur[x] : 0); nbt[v] = nbt[u] + (k === 1 ? 1 : 0);
+          const vb = v * NC, ub = u * NC;
+          for (let c = 0; c < NC; c++) { km[vb + c] = km[ub + c]; bk[vb + c] = bk[ub + c]; nb[vb + c] = nb[ub + c]; }
+          if (k === 3) { km[vb + eCo[x]] += eKm[x]; bk[vb + eCo[x]] += eBkm[x]; } else if (k === 1 && eBus[x]) nb[vb + eCo[x]]++;
+          let i = hn++; while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= nd) break; hk[i] = hk[p]; hv[i] = hv[p]; i = p; } hk[i] = nd; hv[i] = v;
+        }
+      }
     }
-    preds.push({ pe: r.pe, pn: r.pn });
+    for (let t = 0; t < S; t++) {
+      if (t === s || dist[t] === Infinity) continue;
+      let any = false, rail = false; const o = (s * S + t) * NC, tb = t * NC;
+      for (let c = 0; c < NC; c++) { const k = km[tb + c], n = nb[tb + c]; K[o + c] = k; BK[o + c] = bk[tb + c]; NBk[o + c] = n; if (k > 0) { any = rail = true; } if (n > 0) any = true; }
+      if (!any) continue; // 歩いて乗り換えるだけの経路は除く
+      const i = s * S + t;
+      T[i] = dist[t] - P.board; RAIL[i] = rail ? 1 : 0; SUR[i] = sur[t]; NBT[i] = nbt[t];
+    }
   }
-  return { T, K, BK, NB: NBk, RAIL, SUR, NBT, preds };
+  const g = { T, K, BK, NB: NBk, RAIL, SUR, NBT, FN, PE, E, eFrom, N };
+  // 運賃（特急料金を除く）は何度も使うので先に計算しておく
+  if (fares) for (let i = 0; i < SS; i++) if (T[i] !== Infinity) FN[i] = fareTot(g, i, fares) - SUR[i];
+  return g;
 }
 function fareOf(km, fare) {
   const k = Math.ceil(Math.max(km, 0.1));
@@ -590,6 +626,7 @@ const PURP = [
 ];
 for (const p of PURP) p.gen ??= c => c.pop;
 const NP = PURP.length, NB = 5, P_AIR = PURP.findIndex(p => p.special);
+const PK = PURP.map(p => { const pr = p.prof || 'resident'; return pr === 'resident' ? (p.peak ? 0 : 1) : pr === 'visitor' ? 2 : 3; }); // 目的→交通手段の選び方の種類
 let cellsVer = 0, denomVer = -1;
 // 重力モデルの分母。近く（3km以内）はメッシュごと、遠くは約2km四方にまとめて計算して速くする
 function ensureDenoms() {
@@ -634,10 +671,29 @@ function flowsFor(o, d, dk, fl, min) {
   return any;
 }
 // 目的に合った交通手段の選び方（計算は必要なときだけ）
-function mcFor(p, oAcc, dAcc, dk, gPk, gOff, S, fare, done) {
+function mcFor(p, oAcc, dAcc, dk, gPk, gOff, S, fare, done, oc) {
   const pr = PURP[p].prof || 'resident', k = pr === 'resident' ? (PURP[p].peak ? 0 : 1) : pr === 'visitor' ? 2 : 3;
-  if (!done[k]) { modeChoice(oAcc, dAcc, dk, k === 0 ? 0 : 1, k === 0 ? gPk : gOff, S, fare, MC[k], PROF[pr]); done[k] = true; }
+  if (!done[k]) {
+    const g = k === 0 ? gPk : gOff;
+    // 出発メッシュごとに「各駅までの一番よい乗り方」を先に作っておくと、行き先ごとの計算がとても軽くなる
+    let ob = null; if (oc && oAcc && g) { ob = oc.get(oAcc); if (!ob) oc.set(oAcc, ob = []); ob = ob[k] ??= originBest(oAcc, g, S, PROF[pr]); }
+    modeChoice(oAcc, dAcc, dk, k === 0 ? 0 : 1, g, S, fare, MC[k], PROF[pr], ob); done[k] = true;
+  }
   return MC[k];
+}
+// oAcc から各駅 t へ公共交通で行くときの最小の負担（徒歩＋乗車＋乗換＋運賃）と、そのとき使う乗車駅
+function originBest(oAcc, g, S, pf) {
+  const v = new Float64Array(S).fill(Infinity), sI = new Int32Array(S).fill(-1);
+  const T = g.T, NBT = g.NBT, FN = g.FN, SUR = g.SUR, iv = 1 / pf.vot, sv = 1 / pf.vot - 1 / P.vot, xf = pf.xfer, wm = pf.walkMul;
+  for (const [s, ws] of oAcc) {
+    const base = ws * wm, row = s * S;
+    for (let t = 0; t < S; t++) {
+      const i = row + t, tt = T[i]; if (tt === Infinity) continue;
+      const nb = NBT[i], c = base + tt + (nb > 1 ? (nb - 1) * xf : 0) + FN[i] * iv + SUR[i] * sv;
+      if (c < v[t]) { v[t] = c; sI[t] = s; }
+    }
+  }
+  return { v, sI };
 }
 // 駅勢圏：鉄道駅1.2km、バス停600m
 function buildCatch(st) {
@@ -654,21 +710,24 @@ function buildCatch(st) {
       e.acc.push([si, d * P.walkDetour / P.walkSpeed]);
     }
   });
+  // 1つのメッシュから使う駅・バス停は近い順に16か所まで（バス停が密集していても計算が膨らまないように）
+  for (const e of catchMap.values()) if (e.acc.length > 16) { e.acc.sort((a, b) => a[1] - b[1]); e.acc.length = 16; }
   return catchMap;
 }
 // 交通手段の選択（ロジット）。pass=0 朝夕の移動（ピークのダイヤ）, 1 日中の移動
 // p: [鉄道, バス, 徒歩, 自転車, 車]。公共交通の経路に鉄道が含まれれば「鉄道」、バスだけなら「バス」
-function modeChoice(oAcc, dAcc, dk, pass, g, S, fare, out, pf = PROF.resident) {
+function modeChoice(oAcc, dAcc, dk, pass, g, S, fare, out, pf = PROF.resident, ob = null) {
   const walk = dk * 1.25 / 4.5 * 60 * pf.walkMul;
   // 首都圏の事情：自転車は駐輪・天候、車は渋滞と駐車場代で不利
   const bike = (dk * 1.25 / 12 * 60 + 8 + Math.max(0, dk - 4) * 5) * pf.bikeMul;
   const car = dk * 1.3 / 20 * 60 + 15 + (dk * 1.3 * pf.carKm + (pf.carFix ?? (pass ? 600 : 1000))) / pf.vot;
   const ew = Math.exp(-P.theta * walk), eb = Math.exp(-P.theta * bike), ec = Math.exp(-P.theta * car);
   let best = Infinity, bs = -1, bt = -1;
-  if (g && oAcc && dAcc) for (const [s, ws] of oAcc) for (const [t, wt] of dAcc) {
+  if (ob && dAcc) { for (const [t, wt] of dAcc) { const c = ob.v[t] + wt * pf.walkMul; if (c < best) { best = c; bs = ob.sI[t]; bt = t; } } }
+  else if (g && oAcc && dAcc) for (const [s, ws] of oAcc) for (const [t, wt] of dAcc) {
     if (s === t) continue; const i = s * S + t, tt = g.T[i]; if (tt === Infinity) continue;
     // T には料金（特急券など）の負担が住民の時間価値で入っているので、その人の時間価値に直す
-    const c = (ws + wt) * pf.walkMul + tt + Math.max(0, g.NBT[i] - 1) * pf.xfer + (fareTot(g, i, fare) - g.SUR[i]) / pf.vot + g.SUR[i] * (1 / pf.vot - 1 / P.vot);
+    const c = (ws + wt) * pf.walkMul + tt + Math.max(0, g.NBT[i] - 1) * pf.xfer + g.FN[i] / pf.vot + g.SUR[i] * (1 / pf.vot - 1 / P.vot);
     if (c < best) { best = c; bs = s; bt = t; }
   }
   let er = 0, rail = false;
@@ -699,60 +758,85 @@ function computeDemand(m) {
   const capOf = ln => ((ln.hp ? 60 / ln.hp : 0) * ln.cap) || 1e-9;
   const fl = new Float64Array(NP);
 
-  let crowd = null;
+  let crowd = null, ODL = null; const PF = res.prof = {}; let tq = performance.now();
+  const lap = k => { const n = performance.now(); PF[k] = (PF[k] || 0) + Math.round(n - tq); tq = n; };
   for (let iter = 0; iter < 2; iter++) {
     const mul = crowd ? (l, dir, i) => crowd[l][dir][i] : null;
-    const gPk = allPairs(buildGraph(st, lines, true, mul), S);
-    const gOff = allPairs(buildGraph(st, lines, false, mul), S);
+    const adjPk = buildGraph(st, lines, true, mul), adjOff = buildGraph(st, lines, false, mul); lap('graph');
+    const gPk = allPairs(adjPk, S, fare);
+    const gOff = allPairs(adjOff, S, fare); lap('allpairs');
     const pairPk = new Float64Array(S * S), pairAll = new Float64Array(S * S);
-    const pairB = []; for (let b = 0; b < NB; b++) pairB.push(new Float64Array(S * S));
+    const pairB = new Float64Array(S * S * NB); // [ペア×時間帯] を並べて持つ（まとめて読み書きできて速い）
     const board = new Float64Array(S), boardP = new Float64Array(S * NP), boardB = new Float64Array(S * NB);
     const rev = new Float64Array(NP), tripsP = new Float64Array(NP);
     let ptTrips = 0, railTrips = 0, busTrips = 0, allTrips = 0;
-    for (const o of C) {
-      if (o.c.pop < 1 && !o.c.hotel && o.c.shop < 1) continue;
-      for (const d of C) {
-        if (o === d) continue;
-        const dk = distKm(o.c, d.c); if (dk < 0.9) continue;
-        if (!flowsFor(o.c, d.c, dk, fl, 0.005)) continue;
-        const done = [false, false, false, false];
-        for (let p = 0; p < NP; p++) {
-          const flow = fl[p]; if (flow < 0.005) continue;
-          allTrips += flow * 2;
-          const pp = PURP[p], mc = mcFor(p, o.acc, d.acc, dk, gPk, gOff, S, fare, done);
-          if (mc.bs < 0) continue;
-          const bs = mc.bs, bt = mc.bt, i = bs * S + bt, j = bt * S + bs, g = mc.g;
-          const riders = flow * mc.pt; // 片道
-          rev[p] += riders * 2 * fareTot(g, i, fare); tripsP[p] += riders * 2;
-          ptTrips += riders * 2; if (g.RAIL[i]) railTrips += riders * 2; else busTrips += riders * 2;
-          board[bs] += riders; board[bt] += riders;
-          boardP[bs * NP + p] += riders; boardP[bt * NP + p] += riders;
-          for (let b = 0; b < NB; b++) { boardB[bs * NB + b] += riders * pp.out[b]; boardB[bt * NB + b] += riders * pp.ret[b]; pairB[b][i] += riders * pp.out[b]; pairB[b][j] += riders * pp.ret[b]; }
-          pairAll[i] += riders; pairAll[j] += riders;
-          pairPk[i] += riders * pp.out[0] * pp.hpk; pairPk[j] += riders * pp.ret[0] * pp.hpk;
+    const oc = new Map();
+    // 移動量（どこからどこへ何人）は路線の混み具合に関係しないので、1回目に求めたものを使い回す
+    if (!ODL) {
+      ODL = [];
+      for (const o of C) {
+        if (o.c.pop < 1 && !o.c.hotel && o.c.shop < 1) continue;
+        for (const d of C) {
+          if (o === d) continue;
+          const dk = distKm(o.c, d.c); if (dk < 0.9) continue;
+          if (!flowsFor(o.c, d.c, dk, fl, 0.005)) continue;
+          ODL.push({ o, d, dk, fl: Float64Array.from(fl) });
         }
       }
     }
+    let lastO = null;
+    const done = [false, false, false, false], KW = 3 + 2 * NB, KR = new Float64Array(4 * KW), KS = new Int32Array(4), KT = new Int32Array(4);
+    for (const { o, d, dk, fl } of ODL) {
+      {
+        if (o !== lastO) { oc.clear(); lastO = o; }
+        done[0] = done[1] = done[2] = done[3] = false; KR.fill(0);
+        for (let p = 0; p < NP; p++) {
+          const flow = fl[p]; if (flow < 0.005) continue;
+          allTrips += flow * 2;
+          const pp = PURP[p], mc = mcFor(p, o.acc, d.acc, dk, gPk, gOff, S, fare, done, oc);
+          if (mc.bs < 0) continue;
+          const bs = mc.bs, bt = mc.bt, i = bs * S + bt, g = mc.g, k = PK[p];
+          const riders = flow * mc.pt; // 片道
+          rev[p] += riders * 2 * (g.FN[i] + g.SUR[i]); tripsP[p] += riders * 2;
+          ptTrips += riders * 2; if (g.RAIL[i]) railTrips += riders * 2; else busTrips += riders * 2;
+          boardP[bs * NP + p] += riders; boardP[bt * NP + p] += riders;
+          // 同じ乗り方（同じ乗車駅・降車駅）になる目的どうしはまとめてから書き込む
+          const kb = k * KW; KR[kb] += riders; KR[kb + 1] += riders * pp.out[0] * pp.hpk; KR[kb + 2] += riders * pp.ret[0] * pp.hpk;
+          for (let b = 0; b < NB; b++) { KR[kb + 3 + b] += riders * pp.out[b]; KR[kb + 3 + NB + b] += riders * pp.ret[b]; }
+          KS[k] = bs; KT[k] = bt;
+        }
+        for (let k = 0; k < 4; k++) {
+          const kb = k * KW, riders = KR[kb]; if (!(riders > 0)) continue;
+          const bs = KS[k], bt = KT[k], i = bs * S + bt, j = bt * S + bs;
+          board[bs] += riders; board[bt] += riders;
+          for (let b = 0; b < NB; b++) { const ob = KR[kb + 3 + b], rb = KR[kb + 3 + NB + b]; boardB[bs * NB + b] += ob; boardB[bt * NB + b] += rb; pairB[i * NB + b] += ob; pairB[j * NB + b] += rb; }
+          pairAll[i] += riders; pairAll[j] += riders;
+          pairPk[i] += KR[kb + 1]; pairPk[j] += KR[kb + 2];
+        }
+      }
+    }
+    lap('od');
     // 路線への割り当て（ピーク時の経路で）。鉄道の運賃は乗った距離で、バスは乗車ごとに配分
     const nseg = ln => Math.max(ln.stops.length - 1, 0);
     const L = lines.map(ln => ({ riders: 0, revenue: 0, load: [new Float64Array(nseg(ln)), new Float64Array(nseg(ln))], lb: Array.from({ length: NB }, () => [new Float64Array(nseg(ln)), new Float64Array(nseg(ln))]) }));
-    const kmOnLine = new Float64Array(lines.length), bkmOnLine = new Float64Array(lines.length);
+    const kmOnLine = new Float64Array(lines.length), bkmOnLine = new Float64Array(lines.length), touched = [];
     for (let s = 0; s < S; s++) {
-      const { pe, pn } = gPk.preds[s];
+      const N = gPk.N, PE = gPk.PE, EE = gPk.E, EF = gPk.eFrom, b0 = s * N;
       for (let t = 0; t < S; t++) {
         const i = s * S + t, fa = pairAll[i], fp = pairPk[i]; if (fa <= 0 && fp <= 0) continue;
-        kmOnLine.fill(0); bkmOnLine.fill(0);
+        touched.length = 0;
         let u = t, guard = 0;
-        while (u !== s && pn[u] >= 0 && guard++ < 10000) {
-          const e = pe[u];
+        while (u !== s && PE[b0 + u] >= 0 && guard++ < 10000) {
+          const x = PE[b0 + u], e = EE[x];
           if (e.k === 1) { L[e.l].riders += fa; if (e.sur) L[e.l].revenue += fa * e.sur; if (e.bus) { const f = fare[e.co]; L[e.l].revenue += fa * (f.busMode === 'dist' ? f.busBase : (f.bus ?? 210)); } }
-          else if (e.k === 3) { L[e.l].load[e.dir][e.seg] += fp; for (let b = 0; b < NB; b++) L[e.l].lb[b][e.dir][e.seg] += pairB[b][i]; kmOnLine[e.l] += e.km; if (e.bus) bkmOnLine[e.l] += e.bkm; }
-          u = pn[u];
+          else if (e.k === 3) { L[e.l].load[e.dir][e.seg] += fp; const lb = L[e.l].lb; for (let b = 0; b < NB; b++) lb[b][e.dir][e.seg] += pairB[i * NB + b]; if (!kmOnLine[e.l] && !bkmOnLine[e.l]) touched.push(e.l); kmOnLine[e.l] += e.km; if (e.bus) bkmOnLine[e.l] += e.bkm; }
+          u = EF[x];
         }
         // 鉄道の運賃は、会社ごとに乗った距離で計算し、その会社の路線に距離で配分
-        for (let l = 0; l < lines.length; l++) {
+        for (const l of touched) {
           if (kmOnLine[l] > 0) { const c = lines[l].co || 0, kc = gPk.K[i * NC + c]; if (kc > 0) L[l].revenue += fa * fareOf(kc, fare[c]) * kmOnLine[l] / kc; }
           if (bkmOnLine[l] > 0) { const f = fare[lines[l].co || 0]; if (f.busMode === 'dist') L[l].revenue += fa * Math.max(0, bkmOnLine[l] - f.busFreeKm) * f.busPerKm; }
+          kmOnLine[l] = 0; bkmOnLine[l] = 0;
         }
       }
     }
@@ -766,8 +850,11 @@ function computeDemand(m) {
     }
     res.stations = Array.from(board, (b, s) => ({ board: b, byP: Array.from(boardP.subarray(s * NP, s * NP + NP)), byB: Array.from(boardB.subarray(s * NB, s * NB + NB)) }));
     Object.assign(res, { rev: Array.from(rev), tripsP: Array.from(tripsP), ptTrips, railTrips, busTrips, allTrips });
-    lastCtx = { S, catchMap, gPk, gOff, fare, st, lines, ratio };
+    lastCtx = { S, catchMap, gPk, gOff, fare, st, lines, ratio }; lap('assign');
+    // どこも混んでいなければ（定員の70%以下）、2回目は1回目と同じ結果になるので省く
+    if (crowd.every(r => r.every(a => a.every(v => v === 1)))) break;
   }
+  PF.C = C.length; PF.S = S; PF.npairs = ODL ? ODL.length : 0;
   return res;
 }
 
@@ -1069,9 +1156,9 @@ function computeZones(gran) {
   const od = new Map(); // zo*Zn+zd -> [total, 公共交通]
   const { S, catchMap, gPk, gOff, fare } = lastCtx;
   const O = [...zoneOf.keys()].filter(c => c.pop >= 1 || c.hotel > 0 || c.shop >= 1), D = [...zoneOf.keys()];
-  const fl = new Float64Array(NP);
+  const fl = new Float64Array(NP), oc = new Map();
   for (const o of O) {
-    const zo = zoneOf.get(o), oAcc = accOf(o), Zo = Z[zo];
+    const zo = zoneOf.get(o), oAcc = accOf(o), Zo = Z[zo]; oc.clear();
     for (const d of D) {
       if (o === d) continue;
       const dk = distKm(o, d); if (dk < 0.9) continue;
@@ -1081,7 +1168,7 @@ function computeZones(gran) {
       let tot = 0, pt = 0;
       for (let p = 0; p < NP; p++) {
         const flow = fl[p]; if (flow < 0.01) continue;
-        const pp = PURP[p], mc = mcFor(p, oAcc, dAcc, dk, gPk, gOff, S, fare, done);
+        const pp = PURP[p], mc = mcFor(p, oAcc, dAcc, dk, gPk, gOff, S, fare, done, oc);
         for (let m = 0; m < 5; m++) Zo.gen[m] += flow * mc.p[m];
         const f2 = flow * mc.pt;
         Zo.pAll[p] += flow; Zo.pPt[p] += f2;
@@ -1131,7 +1218,8 @@ onmessage = async (ev) => {
     if (!ok) return;
     sendCells();
     const t0 = performance.now();
-    const res = computeDemand(m);
+    let res;
+    try { res = computeDemand(m); } catch (e) { postMessage({ type: 'error', msg: '需要計算でエラー: ' + e.message }); return; }
     if (ver !== latestVer) return;
     postMessage({ type: 'result', res, ms: performance.now() - t0, failed, reqId: m.reqId });
     postZones();
@@ -1158,9 +1246,9 @@ onmessage = async (ev) => {
     try { coords = await busRoute(m.p0, m.p1); } catch (e) { coords = null; }
     postMessage({ type: 'busroute', key: m.key, coords });
   } else if (m.type === 'route') {
-    let fast = null, avoid = null;
+    let fast = null, avoid = null; const t0 = performance.now();
     try { fast = routeSearch(m.s, m.t, m.peak, false); avoid = routeSearch(m.s, m.t, m.peak, true); } catch (e) { postMessage({ type: 'error', msg: '乗換案内でエラー: ' + e.message }); }
-    postMessage({ type: 'route', reqId: m.reqId, fast, avoid });
+    postMessage({ type: 'route', reqId: m.reqId, fast, avoid, ms: performance.now() - t0 });
   }
 };
 </script>
@@ -1271,10 +1359,17 @@ const NET = {
       toast(`${myCo().name}として参加しました`);
     } else if (d.t === 'state') {
       const keepT = G?.t;
-      G = migrate(d.state); if (keepT != null && Math.abs(keepT - G.t) < 120) G.t = keepT;
-      rebuildLines(); checkNewLines(); renderNetwork(); renderPreview(); requestDemand();
+      let netChanged = true, st;
+      if (d.rest != null) {
+        // 路線網が変わっていなければ今の駅・線路・路線をそのまま使い、作り直し・再計算をしない
+        st = JSON.parse(d.rest);
+        if (d.net == null && G) { st.stations = G.stations; st.tracks = G.tracks; st.lines = G.lines; netChanged = false; }
+        else { const [a, b, c] = JSON.parse(d.net); st.stations = a; st.tracks = b; st.lines = c; }
+      } else st = d.state;
+      G = migrate(st); if (keepT != null && Math.abs(keepT - G.t) < 120) G.t = keepT;
+      if (netChanged) { rebuildLines(); checkNewLines(); renderNetwork(); renderPreview(); requestDemand(); }
       if (G.match?.over && G.match.result && !ui.resultShown) { ui.resultShown = true; showResult(); }
-      if (!ui.lineBuild && ui.tool !== 'route') renderPanel();
+      if (!ui.lineBuild && ui.tool !== 'route') { if (netChanged) renderPanel(); else renderPanelSoon(); }
     } else if (d.t === 'tick') {
       if (!G) return;
       if (d.day !== G.day || Math.abs(d.time - G.t) > 90) G.t = d.time;
@@ -1287,7 +1382,12 @@ const NET = {
   sync() {
     if (this.role !== 'host') return;
     clearTimeout(this.syncTimer);
-    this.syncTimer = setTimeout(() => { for (const c of this.conns.keys()) if (c.open) c.send({ t: 'state', state: G }); }, 250);
+    this.syncTimer = setTimeout(() => {
+      // 駅・線路・路線（大きい）は変わったときだけ送る。お金や日付などは毎回送る。文字列にして送ると速い
+      const { stations, tracks, lines, ...rest } = G;
+      const net = JSON.stringify([stations, tracks, lines]), r = JSON.stringify(rest);
+      for (const c of this.conns.keys()) if (c.open) { const full = c._net !== net; c._net = net; c.send({ t: 'state', net: full ? net : null, rest: r }); }
+    }, 250);
   },
   tick() {
     const m = { t: 'tick', time: G.t, day: G.day, speed: ui.speed, money: G.companies.map(c => [c.id, c.money]) };
@@ -1416,10 +1516,16 @@ function toast(msg, ms = 3200) { const d = document.createElement('div'); d.text
 const dateOf = day => new Date(2026, 3, 1 + day);
 const fmtHw = m => m === 7.5 ? '7分30秒' : m + '分';
 const nid = () => G.nid++;
-const stById = id => G.stations.find(s => s.id === id);
-const lnById = id => G.lines.find(l => l.id === id);
-const tkById = id => G.tracks.find(t => t.id === id);
-const coById = id => G.companies.find(c => c.id === id);
+// IDから引く表（配列が作り直されたり長さが変わったら作り直す）。駅・バス停が数百あっても速く引ける
+function mkIdx(get) {
+  let arr = null, len = -1, m = null;
+  return id => {
+    const a = get(); if (!a) return undefined;
+    if (a !== arr || a.length !== len) { arr = a; len = a.length; m = new Map(); for (const x of a) m.set(x.id, x); }
+    return m.get(id);
+  };
+}
+const stById = mkIdx(() => G?.stations), lnById = mkIdx(() => G?.lines), tkById = mkIdx(() => G?.tracks), coById = mkIdx(() => G?.companies);
 const colorDist = (a, b) => { const h = x => [1, 3, 5].map(i => parseInt(String(x).slice(i, i + 2), 16)); const p = h(a), q = h(b); return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); };
 // 乗り入れ：他社の駅・バス停・線路を使えるか（持ち主が許可していれば使える）
 const ACCESS_DEFAULT = { allow: true, trackFee: 1000, stationFee: 3000 }; // 線路使用料（円/編成キロ）、駅使用料（円/停車1回）
@@ -1710,6 +1816,7 @@ function lineTrainKm(L) {
 // 路線の色は会社の色に固定（会社が見分けやすいように）
 function syncColors() { for (const L of G.lines) { const c = coById(L.owner ?? 1)?.color; if (c) L.color = c; } }
 function rebuildLines() {
+  renderTrains.dirty = true; econUse.ver++;
   syncColors();
   const adj = trackAdj(); LD.clear();
   const broken = [];
@@ -1730,6 +1837,19 @@ function accessFees(L) {
   }
   return out;
 }
+// 線路・駅を何路線が使っているか（路線網が変わるまで使い回す）
+function econUse() {
+  if (econUse.c && econUse.lines === G.lines && econUse.v === econUse.ver) return econUse.c;
+  const tk = new Map(), st = new Map();
+  for (const M of G.lines) {
+    for (const sid of new Set(M.stops)) st.set(sid, (st.get(sid) || 0) + 1);
+    const dm = LD.get(M.id); if (!dm || isBus(M)) continue;
+    const seen = new Set(); for (const g of dm.legs) for (const p of g.tracks) seen.add(p.id);
+    for (const id of seen) tk.set(id, (tk.get(id) || 0) + 1);
+  }
+  econUse.lines = G.lines; econUse.v = econUse.ver; return econUse.c = { tk, st };
+}
+econUse.ver = 0;
 const sumFees = m => [...m.values()].reduce((a, b) => a + b, 0);
 // 路線ごとの1日の収支（平日）。線路の保守費と駅の運営費は、使っている路線で割り勘
 function lineEcon(L) {
@@ -1737,12 +1857,12 @@ function lineEcon(L) {
   const sp = spec(L);
   const op = lineTrainKm(L) * kmCostOf(L);
   let share = 0;
+  const U = econUse();
   if (!isBus(L)) {
-    const users = new Map(); for (const M of G.lines) { const dm = LD.get(M.id); if (!dm || isBus(M)) continue; const seen = new Set(); for (const g of dm.legs) for (const p of g.tracks) seen.add(p.id); for (const id of seen) users.set(id, (users.get(id) || 0) + 1); }
     const seen = new Set(); for (const g of d.legs) for (const p of g.tracks) seen.add(p.id);
-    for (const id of seen) { const t = tkById(id); share += t.len / 1000 * COST[t.level].maint / (users.get(id) || 1); }
+    for (const id of seen) { const t = tkById(id); if (t) share += t.len / 1000 * COST[t.level].maint / (U.tk.get(id) || 1); }
   }
-  for (const sid of new Set(L.stops)) { const s = stById(sid); const n = G.lines.filter(M => M.stops.includes(sid)).length || 1; share += (isBus(s) ? BUS.stDay : RAIL.stDay) / n; }
+  for (const sid of new Set(L.stops)) { const s = stById(sid); if (!s) continue; share += (isBus(s) ? BUS.stDay : RAIL.stDay) / (U.st.get(sid) || 1); }
   const fee = sumFees(accessFees(L));
   const r = demand?.ln.get(L.id), rev = r ? r.revenue : 0, cost = op + share + fee;
   return { rev, cost, op, share, fee, profit: rev - cost, coef: rev > 0 ? cost / rev * 100 : null };
@@ -1805,17 +1925,18 @@ function initWorker(tileUrl) {
     const m = ev.data;
     if (m.type === 'progress') setStatus(`${m.what === '地域' ? '地域の' : ''}建物データ読込中 ${m.done}/${m.total}`);
     else if (m.type === 'cells') { cellsData = m; cellIndex = new Map(m.cells.map(c => [c[0] + '_' + c[1], c])); renderMesh(); }
-    else if (m.type === 'error') setStatus(m.msg);
+    else if (m.type === 'error') { setStatus(m.msg); requestDemand.busy = false; requestDemand.key = null; }
     else if (m.type === 'name') {
       const s = stById(m.id);
       if (s && s.autoName && m.name && NET.role !== 'client') { const nm = isBus(s) ? busStopName(s, m.names || m.name) : uniqueName(m.name, s, [s.lng, s.lat]); if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); } }
     }
     else if (m.type === 'censusOk') { setStatus(`統計データ ${fmtNum(m.n)}メッシュを使用中`); requestDemand(); }
     else if (m.type === 'busroute') { const cb = pending.get(m.key); pending.delete(m.key); if (cb) cb(m.coords); }
-    else if (m.type === 'route') { if (ui.route && ui.route.reqId === m.reqId) { ui.route.fast = m.fast; ui.route.avoid = m.avoid; ui.route.loading = false; renderPanel(); renderPreview(); } }
-    else if (m.type === 'zones') { ui.zones.data = m; setStatus(`地域 ${m.zones.length}か所の移動量を表示中`); renderZones(); if (ui.sel?.type === 'zone' || (!ui.sel && !ui.lineBuild && ui.tool === 'select')) renderPanel(); }
+    else if (m.type === 'route') { if (window.__perf) console.log('[perf] route worker ms', Math.round(m.ms)); if (ui.route && ui.route.reqId === m.reqId) { ui.route.fast = m.fast; ui.route.avoid = m.avoid; ui.route.loading = false; renderPanel(); renderPreview(); } }
+    else if (m.type === 'zones') { if (window.__perf) console.log('[perf] zones ms', Math.round(m.ms)); ui.zones.data = m; setStatus(`地域 ${m.zones.length}か所の移動量を表示中`); renderZones(); if (ui.sel?.type === 'zone' || (!ui.sel && !ui.lineBuild && ui.tool === 'select')) renderPanel(); }
     else if (m.type === 'result') {
       if (m.reqId !== reqId) return;
+      requestDemand.busy = false;
       const r = m.res, ids = lastReq.stationIds, lids = lastReq.lineIds;
       demand = { rev: r.rev, tripsP: r.tripsP, ptTrips: r.ptTrips, railTrips: r.railTrips, busTrips: r.busTrips, allTrips: r.allTrips, st: new Map(), ln: new Map() };
       r.stations.forEach((s, i) => demand.st.set(ids[i], s));
@@ -1839,7 +1960,7 @@ function initWorker(tileUrl) {
         agg.bandCrowd = agg.lb.map((b, k) => Math.max(0, ...b[0], ...b[1]) / (agg.bandCap[k] || 1));
         demand.ln.set(lid, agg);
       }
-      setStatus(m.failed ? `需要計算済み（${m.failed}タイル読込失敗）` : `需要計算済み`);
+      if (window.__perf) console.log('[perf] worker ms', Math.round(m.ms), JSON.stringify(m.res.prof)); setStatus(m.failed ? `需要計算済み（${m.failed}タイル読込失敗）` : `需要計算済み`);
       checkRiderChanges();
       if (ui.idlePending) applyIdle();
       renderPanel(); renderNetwork();
@@ -1862,10 +1983,9 @@ function requestDemand() {
       services(L).forEach((sv, si) => { if ((sv.hp || sv.ho) && sv.idx.length >= 2) svcs.push({ L, sv, si, tt }); });
     }
     lastReq = { stationIds: stations.map(s => s.id), lineIds: svcs.map(x => x.L.id), svc: svcs.map(x => ({ lid: x.L.id, si: x.si, idx: x.sv.idx, type: x.sv.type })), idx };
-    if (!lines.length) { demand = null; setStatus('路線を作ると乗客が発生します'); renderPanel(); return; }
-    setStatus('需要を計算中…');
-    worker.postMessage({
-      type: 'compute', reqId: ++reqId, fares: G.companies.map(c => c.fare),
+    if (!lines.length) { requestDemand.key = null; demand = null; setStatus('路線を作ると乗客が発生します'); renderPanel(); return; }
+    const msg = {
+      type: 'compute', fares: G.companies.map(c => c.fare),
       stations: stations.map(s => ({ lng: s.lng, lat: s.lat, kind: s.kind })),
       lines: svcs.map(({ L, sv, si, tt }) => {
         const co = Math.max(0, G.companies.findIndex(c => c.id === (L.owner ?? 1))), d = LD.get(L.id);
@@ -1873,7 +1993,13 @@ function requestDemand() {
         const lg = tt.svcLeg[si];
         return { co, grp: L.id, mode: 'rail', cap: svcCap(L, sv), sur: sv.sur, stops: sv.idx.map(i => idx.get(L.stops[i])), legT: lg.legT, legTo: lg.legTo, legL: lg.legL, hp: sv.hp, ho: sv.ho };
       }),
-    });
+    };
+    // 前回と同じ条件なら計算し直さない（名前の変更や他社の操作などで何度も重い計算をしないように）
+    const key = JSON.stringify(msg) + '|' + (CENSUS.entries?.length || 0);
+    if (key === requestDemand.key && (demand || requestDemand.busy)) return;
+    requestDemand.key = key; requestDemand.busy = true;
+    setStatus('需要を計算中…');
+    msg.reqId = ++reqId; worker.postMessage(msg);
   }, 500);
 }
 function askBusRoute(a, b, cb) {
@@ -2002,6 +2128,7 @@ function coefColor(coef) {
 const colorCache = new Map();
 const lineColor = L => ui.colorMode === 'profit' ? (colorCache.get(L.id) || '#9e9e9e') : L.color;
 function renderNetwork() {
+  renderTrains.dirty = true;
   if (!mapReady || !G) return;
   const selT = ui.sel?.type === 'track' ? ui.sel.id : -1;
   map.getSource('tracks').setData({ type: 'FeatureCollection', features: G.tracks.map(t => ({ type: 'Feature', properties: { id: t.id, lv: t.level }, geometry: { type: 'LineString', coordinates: t.coords } })) });
@@ -2088,7 +2215,7 @@ function renderTrains() {
       f.push({ type: 'Feature', properties: { color: col, bus }, geometry: { type: 'Point', coordinates: pointAt(d, s.d0 + (s.d1 - s.d0) * e) } });
     }
   }
-  map.getSource('trains').setData({ type: 'FeatureCollection', features: f });
+  map.getSource('trains').setData({ type: 'FeatureCollection', features: f }); renderTrains.n = f.length;
 }
 function trainsFromTT(L, d, f) {
   const tt = ensureTT(L); if (!tt) return;
@@ -2750,9 +2877,15 @@ function updateHint() {
 }
 
 // ---------- パネル ----------
+// 入力欄に文字を打っている最中はパネルを描き直さない（描き直すと入力欄が消えて、打った文字がショートカットとして扱われてしまう）
+// お金などの表示だけの更新は、0.8秒に1回までにまとめる
+function renderPanelSoon() { if (renderPanelSoon.t) return; renderPanelSoon.t = setTimeout(() => { renderPanelSoon.t = null; renderPanel(); }, 800); }
+const typingIn = el => !!el && (el.isContentEditable || (el.matches?.('input,textarea,select') && !['checkbox', 'radio', 'button', 'color', 'file'].includes(el.type)));
 function renderPanel() {
   if (!G) return;
   const p = $('#panel');
+  if (typingIn(document.activeElement) && p.contains(document.activeElement)) { ui.panelDirty = true; return; }
+  ui.panelDirty = false;
   if ((ui.tool === 'line' || ui.tool === 'busline') && ui.lineBuild) return p.innerHTML = panelLineBuild();
   if (ui.tool === 'route') return p.innerHTML = panelRoute();
   if (ui.tool === 'stlist') return p.innerHTML = panelStationList();
@@ -3327,7 +3460,9 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && G &
 function frame(now) {
   advanceClock(now, 0.25);
   if (G) {
-    renderTrains();
+    // 車両の位置の更新は地図にとって重いので、止まっているときは描き直さず、動いているときも1秒に10〜20回にとどめる
+    const iv = (renderTrains.n || 0) > 250 ? 100 : 50;
+    if ((G.t !== renderTrains.lastT || renderTrains.dirty) && now - (renderTrains.at || 0) >= iv) { renderTrains.at = now; renderTrains.lastT = G.t; renderTrains.dirty = false; renderTrains(); }
     if (now - uiTick > 200) { uiTick = now; updateTop(); }
   }
   requestAnimationFrame(frame);
@@ -3380,8 +3515,13 @@ document.querySelectorAll('[data-level]').forEach(b => b.addEventListener('click
 document.querySelectorAll('[data-speed]').forEach(b => b.addEventListener('click', () => setSpeed(+b.dataset.speed)));
 $('#radius').addEventListener('change', e => { ui.radius = e.target.value === 'auto' ? 'auto' : +e.target.value; renderPreview(); updateHint(); });
 $('#colorMode').addEventListener('change', e => { ui.colorMode = e.target.value; renderNetwork(); });
+// 入力が終わったら、待たせていた描き直しをする
+$('#panel').addEventListener('focusout', () => setTimeout(() => { if (ui.panelDirty && !typingIn(document.activeElement)) renderPanel(); }, 0));
 document.addEventListener('keydown', e => {
-  if (!G || e.target.matches('input,select,textarea')) return;
+  // 文字入力中（日本語の変換中を含む）や、Ctrl・⌘・Altとの組み合わせはショートカットにしない
+  if (!G || e.isComposing || e.keyCode === 229 || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (typingIn(e.target) || typingIn(document.activeElement)) return;
+  if ($('#start').style.display !== 'none') return; // タイトル画面では使わない
   const tools = { '1': 'select', '2': 'station', '3': 'track', '4': 'line', '5': 'busstop', '6': 'busline', '7': 'route', '8': 'remove', '0': 'stlist' };
   if (tools[e.key]) setTool(tools[e.key]);
   else if (e.key === '9') showZones(!ui.zones.on);
