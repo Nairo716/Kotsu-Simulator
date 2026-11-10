@@ -113,6 +113,19 @@ td:first-child,th:first-child{text-align:left}
 .modalwrap{position:absolute;inset:0;background:rgba(10,14,18,.45);z-index:26;align-items:center;justify-content:center}
 .sharebar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin:4px 0}.sharebar i{display:block;height:100%}
 .news{font-size:12px;line-height:1.6;max-height:140px;overflow:auto}
+.pdiag{position:relative;margin:30px 0 6px}
+.pdsvg{position:absolute;left:0;top:0;overflow:visible}
+.drow{display:flex;align-items:center;justify-content:space-between;gap:6px;border-bottom:1px dashed var(--line)}
+.dname{font-size:13px;line-height:1.2}.dname .nm{cursor:pointer;font-weight:500}.dname .mk{color:var(--sub);font-size:11px;margin-left:3px}
+.dname .sub{font-size:10px}
+.dright{display:flex;align-items:center;gap:2px;flex-wrap:wrap;justify-content:flex-end}
+.pax{font-variant-numeric:tabular-nums;font-size:12px;min-width:44px;text-align:right;color:var(--ink)}
+.slhead{display:flex;gap:14px;font-size:12px;color:var(--sub);border-bottom:1px solid var(--line);padding:4px 2px}
+.slhead span{cursor:pointer}.slhead span.on{color:var(--ink);font-weight:700}
+.sllist{max-height:calc(100vh - 330px);overflow:auto}
+.slrow{display:flex;align-items:center;gap:6px;padding:5px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.slrow:hover{background:var(--chip)}
+.slname{flex:0 0 auto;max-width:42%;font-size:13px}.slb{flex:1;display:flex;flex-wrap:wrap;gap:2px;justify-content:flex-end}
 .tabs{display:flex;gap:4px;margin:6px 0}
 .step{border-left:5px solid;padding:4px 8px;margin:4px 0;background:var(--chip);border-radius:0 8px 8px 0;font-size:13px}
 .step.walk{border-color:var(--sub);border-left-style:dotted}
@@ -177,6 +190,7 @@ td:first-child,th:first-child{text-align:left}
   <button class="btn" data-tool="busline">バス路線を作成<span class="key">6</span></button>
   <div class="small">調べる</div>
   <button class="btn" data-tool="route">乗換案内<span class="key">7</span></button>
+  <button class="btn" data-tool="stlist">駅一覧<span class="key">0</span></button>
   <button class="btn" data-zones="1">地域の移動量<span class="key">9</span></button>
   <select id="colorMode" title="路線の色"><option value="line">路線の色：路線色</option><option value="profit">路線の色：収支</option></select>
   <button class="btn" data-tool="remove">撤去<span class="key">8</span></button>
@@ -2730,6 +2744,7 @@ function updateHint() {
   else if (ui.tool === 'busstop') h = `道路沿いをクリックしてバス停を置きます。駅の近くなら「〇〇駅前」になります。<br>1か所 ${fmtYen(BUS.stop)}`;
   else if (ui.tool === 'busline') h = '始点と終点をクリックすると、道路に沿って経路を探し、バス停を自動で置きます。既存のバス停をクリックすれば、そこに止まります。';
   else if (ui.tool === 'route') h = '出発する駅・バス停と、到着する駅・バス停を順にクリックします。';
+  else if (ui.tool === 'stlist') h = '右の一覧で、駅ごとの乗客数を比べられます。';
   else if (ui.tool === 'remove') h = '駅・バス停・線路・路線をクリックして選び、右のパネルで撤去します。費用は戻りません。';
   $('#toolhint').innerHTML = h;
 }
@@ -2740,6 +2755,7 @@ function renderPanel() {
   const p = $('#panel');
   if ((ui.tool === 'line' || ui.tool === 'busline') && ui.lineBuild) return p.innerHTML = panelLineBuild();
   if (ui.tool === 'route') return p.innerHTML = panelRoute();
+  if (ui.tool === 'stlist') return p.innerHTML = panelStationList();
   const s = ui.sel;
   if (s?.type === 'station' && stById(s.id)) return p.innerHTML = panelStation(stById(s.id));
   if (s?.type === 'line' && lnById(s.id)) return p.innerHTML = panelLine(lnById(s.id));
@@ -2821,18 +2837,49 @@ function endSelect(L, sv, f, dis) {
 function hwSelectOld(id, v) { return `<select id="${id}">${HEADWAYS.map(h => `<option value="${h}" ${h === v ? 'selected' : ''}>${fmtHw(h)}ごと</option>`).join('')}</select>`; }
 const crowdColor = c => c >= 150 ? '#c0392b' : c >= 100 ? '#e67e22' : '#27ae60';
 // 路線図（縦型）：停車駅ごとに乗り換えできる路線をバッジで表示
+// 種別の短い記号（路線記号＋種別）。例：1、1快、1特、1区（区間運転の普通）
+const TYPE_SHORT = { '普通': '', '準急': '準', '区間快速': '区快', '快速': '快', '通勤快速': '通快', '急行': '急', '快速急行': '快急', 'ライナー': 'ラ', '特急': '特' };
+function svcLabel(L, sv) { return L.code + (sv.key === 'base' ? '' : (sv.type === '普通' ? '区' : TYPE_SHORT[sv.type] ?? sv.type.slice(0, 1))); }
+function svcBadge(L, sv) {
+  const bg = sv.key === 'base' || sv.type === '普通' ? L.color : svcColor(sv.type);
+  return `<span class="badge" data-line="${L.id}" title="${esc(sv.type)}・${esc(L.name)}${sv.part ? '（区間運転）' : ''}" style="background:${bg}">${esc(svcLabel(L, sv))}</span>`;
+}
+// その駅に止まる運行（路線・種別ごと）のバッジ
+function stopBadges(sid, exceptLine) {
+  const out = [];
+  for (const L of G.lines) {
+    if (L.id === exceptLine) continue;
+    const i = L.stops.indexOf(sid); if (i < 0) continue;
+    if (isBus(L)) { out.push(badge(L)); continue; }
+    for (const sv of services(L)) if (sv.idx.includes(i) && (sv.hp || sv.ho)) out.push(svcBadge(L, sv));
+  }
+  return out.join('');
+}
+// 路線図（停車駅パターン）：種別ごとに縦の線を並べ、止まる駅に丸、通過する駅は線だけ
 function lineDiagram(L, r) {
-  const n = L.stops.length; let h = '<div class="diagram">';
-  L.stops.forEach((sid, i) => {
-    const s = stById(sid), d = demand?.st.get(sid), tr = transfersAt(sid, L.id);
-    h += `<div class="dstop ${i === 0 ? 'first' : ''} ${i === n - 1 ? 'last' : ''}"><i class="dbar" style="background:${L.color}"></i><i class="dot" style="border-color:${L.color}"></i>
-      <div><span class="nm" data-st="${sid}">${esc(s.name)}</span>${d ? `<div class="sub">乗車 ${fmtNum(d.board)}人/日</div>` : ''}</div><div>${tr.map(badge).join('')}</div></div>`;
-    if (i < n - 1) {
-      const c = r ? Math.max(r.load[0][i] || 0, r.load[1][i] || 0) / r.cap * 100 : 0;
-      h += `<div class="dseg"><i class="dbar" style="background:${L.color}"></i>${c >= 1 ? `<span style="color:${crowdColor(c)}">混雑 ${Math.round(c)}%</span>` : ''}</div>`;
-    }
+  const n = L.stops.length, SV = (isBus(L) ? services(L).slice(0, 1) : services(L)).filter(sv => sv.hp || sv.ho || sv.key === 'base');
+  const RH = 40, CW = 18, X0 = 12, W = X0 + SV.length * CW, H = n * RH;
+  let svg = '';
+  SV.forEach((sv, c) => {
+    const x = X0 + c * CW, col = sv.key === 'base' || sv.type === '普通' ? L.color : svcColor(sv.type);
+    const y0 = sv.idx[0] * RH + RH / 2, y1 = sv.idx[sv.idx.length - 1] * RH + RH / 2;
+    svg += `<line x1="${x}" y1="${y0}" x2="${x}" y2="${y1}" stroke="${col}" stroke-width="6" stroke-linecap="round"/>`;
+    for (const i of sv.idx) svg += `<circle cx="${x}" cy="${i * RH + RH / 2}" r="5.5" fill="#fff" stroke="${col}" stroke-width="3"/>`;
+    // 列のいちばん上に種別の記号
+    const lab = svcLabel(L, sv);
+    svg += `<rect x="${x - 9}" y="${Math.max(0, y0 - 24)}" width="${Math.max(18, lab.length * 9 + 6)}" height="15" rx="7.5" fill="${col}"/><text x="${x - 9 + Math.max(18, lab.length * 9 + 6) / 2}" y="${Math.max(0, y0 - 24) + 11.5}" font-size="10" font-weight="700" fill="#fff" text-anchor="middle">${esc(lab)}</text>`;
   });
-  return h + '</div>';
+  // 駅の間の混雑率（全種別あわせて）
+  let rows = '';
+  L.stops.forEach((sid, i) => {
+    const s = stById(sid), d = demand?.st.get(sid);
+    const marks = `${s.passing && i > 0 && i < n - 1 ? '<span class="mk" title="待避線">◆</span>' : ''}${s.turnback && i > 0 && i < n - 1 ? '<span class="mk" title="折り返し設備">↩</span>' : ''}`;
+    const c = i < n - 1 && r ? Math.max(r.load[0][i] || 0, r.load[1][i] || 0) / r.cap * 100 : 0;
+    rows += `<div class="drow" style="height:${RH}px"><div class="dname"><span class="nm" data-st="${sid}">${esc(s.name)}</span>${marks}${c >= 1 ? `<div class="sub" style="color:${crowdColor(c)}">↓ 混雑 ${Math.round(c)}%</div>` : ''}</div>
+      <div class="dright">${stopBadges(sid, L.id)}<span class="pax">${d ? fmtMan(d.board) : ''}</span></div></div>`;
+  });
+  return `<div class="pdiag" style="padding-left:${W + 8}px"><svg class="pdsvg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${svg}</svg>${rows}</div>
+  <p class="small">縦の線が種別ごとの運転区間、丸が停車駅です。右の数字は駅の乗車人員（人/日）、バッジはその駅に止まるほかの路線・種別です。◆待避線　↩折り返し設備</p>`;
 }
 function panelLine(L) {
   const d = LD.get(L.id), r = demand?.ln.get(L.id), sp = spec(L), ec = lineEcon(L), bus = isBus(L);
@@ -2926,6 +2973,21 @@ function routeHtml(r) {
       <span class="small">待ち約${fmtMin(s.wait)}・乗車${fmtMin(s.min)}・${Math.abs(s.toI - s.fromI)}${isBus(L) ? '停留所' : '駅'}</span>　<span style="color:${crowdColor(c)}">混雑 ${c}%</span><br>→ <b>${esc(to.name)}</b></div>`;
   }).join('');
   return `<div class="kv"><div>所要時間</div><div>約${Math.round(r.totalMin)}分</div><div>運賃</div><div>${fmtNum(r.fare)}円</div><div>乗り換え</div><div>${r.transfers}回</div><div>いちばん混む区間</div><div style="color:${crowdColor(r.maxCrowd * 100)}">${Math.round(r.maxCrowd * 100)}%</div></div>${steps}`;
+}
+// 駅一覧：乗客の多い順・名前順・地図の中心からの距離順に並べ替えられる
+const SL = { sort: 'pax', who: 'all', kind: 'all' };
+function panelStationList() {
+  const c = map.getCenter();
+  let list = G.stations.filter(s => (SL.who === 'all' || mine(s)) && (SL.kind === 'all' || (SL.kind === 'bus') === isBus(s)) && G.lines.some(L => L.stops.includes(s.id)));
+  const pax = s => demand?.st.get(s.id)?.board || 0, dist = s => hav([s.lng, s.lat], [c.lng, c.lat]);
+  list.sort(SL.sort === 'name' ? (a, b) => a.name.localeCompare(b.name, 'ja') : SL.sort === 'dist' ? (a, b) => dist(a) - dist(b) : (a, b) => pax(b) - pax(a));
+  const total = list.reduce((a, s) => a + pax(s), 0);
+  const tab = (k, v, t) => `<button class="btn ${SL[k] === v ? 'on' : ''}" data-sl="${k}:${v}">${t}</button>`;
+  return `<h2>駅一覧</h2>
+  <div class="tabs">${tab('who', 'all', '全社')}${tab('who', 'mine', '自社')}　${tab('kind', 'all', 'すべて')}${tab('kind', 'rail', '鉄道')}${tab('kind', 'bus', 'バス')}</div>
+  <div class="slhead"><span data-sl="sort:name" class="${SL.sort === 'name' ? 'on' : ''}">名前</span><span data-sl="sort:dist" class="${SL.sort === 'dist' ? 'on' : ''}">距離</span><span data-sl="sort:pax" class="${SL.sort === 'pax' ? 'on' : ''}" style="margin-left:auto">▾ 乗客</span></div>
+  <div class="sllist">${list.slice(0, 300).map(s => `<div class="slrow" data-st="${s.id}"><span class="slname">${esc(s.name)}${SL.sort === 'dist' ? `<span class="small"> ${fmtKm(dist(s))}</span>` : ''}</span><span class="slb">${stopBadges(s.id)}</span><span class="pax">${pax(s) ? fmtMan(pax(s)) : '―'}</span></div>`).join('') || '<span class="small">路線の通っている駅がありません</span>'}</div>
+  <p class="small">${list.length}駅・乗車人員の合計 ${fmtMan(total)}人/日（平日）。乗客は1日の乗車人員です。駅名をクリックするとその駅へ移動します。</p>`;
 }
 function panelRoute() {
   const r = ui.route;
@@ -3028,6 +3090,10 @@ function focusLine(id) {
 $('#panel').addEventListener('click', e => {
   const zi = e.target.closest('[data-zone]');
   if (zi) { ui.sel = { type: 'zone', i: +zi.dataset.zone }; renderZones(); renderPanel(); const z = ui.zones.data.zones[ui.sel.i]; map.easeTo({ center: [z.lon, z.lat] }); return; }
+  const slb = e.target.closest('[data-sl]');
+  if (slb) { const [k, v] = slb.dataset.sl.split(':'); SL[k] = v; renderPanel(); return; }
+  if (ui.tool === 'stlist' && e.target.closest('.badge[data-line]')) return focusLine(+e.target.closest('.badge[data-line]').dataset.line);
+  else if (ui.tool === 'stlist' && e.target.closest('[data-st]')) { const s = stById(+e.target.closest('[data-st]').dataset.st); map.easeTo({ center: [s.lng, s.lat], zoom: Math.max(map.getZoom(), 14) }); setTool('select'); ui.sel = { type: 'station', id: s.id }; renderNetwork(); renderPanel(); return; }
   const sn = e.target.closest('[data-st]');
   if (sn) { const s = stById(+sn.dataset.st); ui.sel = { type: 'station', id: s.id }; map.easeTo({ center: [s.lng, s.lat] }); renderNetwork(); renderPanel(); return; }
   const it = e.target.closest('[data-line]'); if (it && ui.tool !== 'route') return focusLine(+it.dataset.line);
@@ -3316,7 +3382,7 @@ $('#radius').addEventListener('change', e => { ui.radius = e.target.value === 'a
 $('#colorMode').addEventListener('change', e => { ui.colorMode = e.target.value; renderNetwork(); });
 document.addEventListener('keydown', e => {
   if (!G || e.target.matches('input,select,textarea')) return;
-  const tools = { '1': 'select', '2': 'station', '3': 'track', '4': 'line', '5': 'busstop', '6': 'busline', '7': 'route', '8': 'remove' };
+  const tools = { '1': 'select', '2': 'station', '3': 'track', '4': 'line', '5': 'busstop', '6': 'busline', '7': 'route', '8': 'remove', '0': 'stlist' };
   if (tools[e.key]) setTool(tools[e.key]);
   else if (e.key === '9') showZones(!ui.zones.on);
   else if (e.key === 'Escape') { if (ui.drawing) { ui.drawing = null; renderPreview(); updateHint(); } else if (ui.tool !== 'select') setTool('select'); else { ui.sel = null; renderNetwork(); renderZones(); renderPanel(); } }
