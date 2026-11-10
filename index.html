@@ -153,6 +153,8 @@ td:first-child,th:first-child{text-align:left}
     <button class="btn" data-speed="1" title="1秒で1分">1分/秒</button>
     <button class="btn" data-speed="5" title="1秒で5分">5分/秒</button>
     <button class="btn" data-speed="30" title="1秒で30分">30分/秒</button>
+    <button class="btn" data-speed="120" title="1秒で2時間">2時間/秒</button>
+    <button class="btn" data-speed="720" title="1秒で12時間">12時間/秒</button>
   </div>
   <div class="card" id="status">準備中…</div>
   <div class="card" id="roomCode" style="display:none;font-weight:700"></div>
@@ -1773,7 +1775,8 @@ function endOfDay(quiet) {
   }
   G.day++;
   if (NET.role !== 'client') checkMatchEnd();
-  if (!quiet) { save(true); NET.sync(); }
+  // 早回しのときは毎日セーブすると重いので、セーブ・同期は1秒に1回まで
+  if (!quiet && performance.now() - (endOfDay.last || 0) > 1000) { endOfDay.last = performance.now(); save(true); NET.sync(); }
   if (ui.sel == null && !ui.lineBuild && !ui.route && ui.tool !== 'route') renderPanel();
 }
 
