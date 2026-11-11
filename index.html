@@ -184,10 +184,20 @@ td:first-child,th:first-child{text-align:left}
     <button class="btn" data-level="1">高架</button>
     <button class="btn" data-level="-1">地下</button>
   </div>
+  <div class="levels">
+    <button class="btn" data-gauge="2" title="複線の線路・2線の駅">複線</button>
+    <button class="btn" data-gauge="1" title="建設費は半分。単線を通る路線は列車の本数が半分になります">単線</button>
+  </div>
   <select id="radius" title="曲線半径"><option value="auto">カーブ：自動（大きく）</option><option value="2000">カーブ：R2000m</option><option value="1000">カーブ：R1000m</option><option value="600">カーブ：R600m</option><option value="300">カーブ：R300m</option><option value="160">カーブ：R160m</option></select>
   <div class="small">バス</div>
   <button class="btn" data-tool="busstop">バス停を設置<span class="key">5</span></button>
   <button class="btn" data-tool="busline">バス路線を作成<span class="key">6</span></button>
+  <div class="small">船・貨物</div>
+  <button class="btn" data-tool="port">港を建設</button>
+  <button class="btn" data-tool="ferryline">航路を作成</button>
+  <button class="btn" data-tool="depot">貨物ターミナル</button>
+  <button class="btn" data-tool="truckline">トラック便</button>
+  <button class="btn" data-tool="freightline">貨物列車</button>
   <div class="small">調べる</div>
   <button class="btn" data-tool="route">乗換案内<span class="key">7</span></button>
   <button class="btn" data-tool="stlist">駅一覧<span class="key">0</span></button>
@@ -503,9 +513,10 @@ function buildGraph(st, lines, peak, rideMul) {
       adj[s].push({ to: n, t: wait + P.board + (ln.sur || 0) / P.vot, km: 0, k: 1, l, bus, co: ln.co || 0, sur: ln.sur || 0 });
       adj[n].push({ to: s, t: 0, km: 0, k: 2, l });
       if (i < ln.stops.length - 1) {
-        const km = bus ? 0 : ln.legL[i] / 1000, bkm = bus ? ln.legL[i] / 1000 : 0;
-        adj[n].push({ to: n + 1, t: LT[i] / 60 * (rideMul ? rideMul(l, 0, i) : 1), km, bkm, k: 3, l, seg: i, dir: 0, co: ln.co || 0, bus });
-        adj[n + 1].push({ to: n, t: LT[i] / 60 * (rideMul ? rideMul(l, 1, i) : 1), km, bkm, k: 3, l, seg: i, dir: 1, co: ln.co || 0, bus });
+        // フェリーは鉄道・バスの運賃とは別に、乗った距離の運賃（sur）を足していく
+        const ferry = ln.mode === 'ferry', km = bus || ferry ? 0 : ln.legL[i] / 1000, bkm = bus ? ln.legL[i] / 1000 : 0, fs = ferry ? ln.legL[i] / 1000 * (ln.fpk || 0) : 0;
+        adj[n].push({ to: n + 1, t: LT[i] / 60 * (rideMul ? rideMul(l, 0, i) : 1) + fs / P.vot, km, bkm, k: 3, l, seg: i, dir: 0, co: ln.co || 0, bus, sur: fs });
+        adj[n + 1].push({ to: n, t: LT[i] / 60 * (rideMul ? rideMul(l, 1, i) : 1) + fs / P.vot, km, bkm, k: 3, l, seg: i, dir: 1, co: ln.co || 0, bus, sur: fs });
       }
     }
   });
@@ -522,7 +533,7 @@ function dijkstraFrom(adj, s) {
     for (const e of adj[u]) {
       const nd = d + e.t, v = e.to;
       if (nd < dist[v] - 1e-9) {
-        dist[v] = nd; pe[v] = e; pn[v] = u; sur[v] = sur[u] + (e.k === 1 ? e.sur || 0 : 0); nbt[v] = nbt[u] + (e.k === 1 ? 1 : 0);
+        dist[v] = nd; pe[v] = e; pn[v] = u; sur[v] = sur[u] + (e.sur || 0); nbt[v] = nbt[u] + (e.k === 1 ? 1 : 0);
         for (let c = 0; c < NC; c++) { km[v * NC + c] = km[u * NC + c]; bk[v * NC + c] = bk[u * NC + c]; nb[v * NC + c] = nb[u * NC + c]; }
         if (e.k === 3) { km[v * NC + e.co] += e.km; bk[v * NC + e.co] += e.bkm || 0; } else if (e.k === 1 && e.bus) nb[v * NC + e.co]++;
         heapPush(h, [nd, v]);
@@ -557,7 +568,7 @@ function allPairs(adj, S, fares) {
         const v = eTo[x], nd = d + eT[x];
         if (nd < dist[v] - 1e-9) {
           dist[v] = nd; pe[v] = x; const k = eK[x];
-          sur[v] = sur[u] + (k === 1 ? eSur[x] : 0); nbt[v] = nbt[u] + (k === 1 ? 1 : 0);
+          sur[v] = sur[u] + eSur[x]; nbt[v] = nbt[u] + (k === 1 ? 1 : 0);
           const vb = v * NC, ub = u * NC;
           for (let c = 0; c < NC; c++) { km[vb + c] = km[ub + c]; bk[vb + c] = bk[ub + c]; nb[vb + c] = nb[ub + c]; }
           if (k === 3) { km[vb + eCo[x]] += eKm[x]; bk[vb + eCo[x]] += eBkm[x]; } else if (k === 1 && eBus[x]) nb[vb + eCo[x]]++;
@@ -569,7 +580,7 @@ function allPairs(adj, S, fares) {
       if (t === s || dist[t] === Infinity) continue;
       let any = false, rail = false; const o = (s * S + t) * NC, tb = t * NC;
       for (let c = 0; c < NC; c++) { const k = km[tb + c], n = nb[tb + c]; K[o + c] = k; BK[o + c] = bk[tb + c]; NBk[o + c] = n; if (k > 0) { any = rail = true; } if (n > 0) any = true; }
-      if (!any) continue; // 歩いて乗り換えるだけの経路は除く
+      if (!any && !nbt[t]) continue; // 歩いて乗り換えるだけの経路は除く（フェリーだけの経路は残す）
       const i = s * S + t;
       T[i] = dist[t] - P.board; RAIL[i] = rail ? 1 : 0; SUR[i] = sur[t]; NBT[i] = nbt[t];
     }
@@ -829,7 +840,7 @@ function computeDemand(m) {
         while (u !== s && PE[b0 + u] >= 0 && guard++ < 10000) {
           const x = PE[b0 + u], e = EE[x];
           if (e.k === 1) { L[e.l].riders += fa; if (e.sur) L[e.l].revenue += fa * e.sur; if (e.bus) { const f = fare[e.co]; L[e.l].revenue += fa * (f.busMode === 'dist' ? f.busBase : (f.bus ?? 210)); } }
-          else if (e.k === 3) { L[e.l].load[e.dir][e.seg] += fp; const lb = L[e.l].lb; for (let b = 0; b < NB; b++) lb[b][e.dir][e.seg] += pairB[i * NB + b]; if (!kmOnLine[e.l] && !bkmOnLine[e.l]) touched.push(e.l); kmOnLine[e.l] += e.km; if (e.bus) bkmOnLine[e.l] += e.bkm; }
+          else if (e.k === 3) { if (e.sur) L[e.l].revenue += fa * e.sur; L[e.l].load[e.dir][e.seg] += fp; const lb = L[e.l].lb; for (let b = 0; b < NB; b++) lb[b][e.dir][e.seg] += pairB[i * NB + b]; if (!kmOnLine[e.l] && !bkmOnLine[e.l]) touched.push(e.l); kmOnLine[e.l] += e.km; if (e.bus) bkmOnLine[e.l] += e.bkm; }
           u = EF[x];
         }
         // 鉄道の運賃は、会社ごとに乗った距離で計算し、その会社の路線に距離で配分
@@ -856,6 +867,83 @@ function computeDemand(m) {
   }
   PF.C = C.length; PF.S = S; PF.npairs = ODL ? ODL.length : 0;
   return res;
+}
+
+// ---------- 貨物 ----------
+// 拠点（貨物駅・港・トラックターミナル）のまわり3kmの事業所・住民から荷物が出る（トン/日）。
+// 拠点どうしの流れは重力モデル、自社の便を使うか一般のトラック（他社）に頼むかはコストで選ぶ。
+const FR = { R: 3000, perJob: 0.04, perPop: 0.012, lam: 60, share: 0.6, bg: 20000, vot: 300, handle: 300, dray: 400, truckKm: 30, truckFix: 1500, truckSpeed: 45, theta: 1 / 1500 };
+function computeFreight(m) {
+  const N = m.nodes.length, lines = m.lines;
+  // 発生量：いちばん近い拠点にまとめる（3km以内）
+  const gen = new Float64Array(N);
+  for (const c of cells.values()) {
+    if (c.jobs < 1 && c.pop < 1) continue;
+    let bi = -1, bd = FR.R / 1000;
+    for (let i = 0; i < N; i++) { const d = distKm(c, { lat: m.nodes[i].lat, lon: m.nodes[i].lng }); if (d < bd) { bd = d; bi = i; } }
+    if (bi >= 0) gen[bi] += c.jobs * FR.perJob + c.pop * FR.perPop;
+  }
+  // 拠点＋各路線の停車点のグラフ。費用は「円/トン」（運賃＋時間＋積み替え）
+  const adj = []; for (let i = 0; i < N; i++) adj.push([]);
+  lines.forEach((ln, l) => {
+    const base = adj.length; for (let i = 0; i < ln.stops.length; i++) adj.push([]);
+    if (!(ln.perDay > 0)) return;
+    const waitH = 20 / ln.perDay / 2; // 平均の待ち（1日20時間運行）
+    for (let i = 0; i < ln.stops.length; i++) {
+      const s = ln.stops[i], n = base + i;
+      adj[s].push({ to: n, c: FR.handle + (waitH + 1) * FR.vot, k: 1, l });
+      adj[n].push({ to: s, c: 0, k: 2, l });
+      if (i < ln.stops.length - 1) {
+        const km = ln.legL[i] / 1000, c = km * ln.rate + ln.legT[i] / 3600 * FR.vot;
+        adj[n].push({ to: n + 1, c, k: 3, l, seg: i, dir: 0, km });
+        adj[n + 1].push({ to: n, c, k: 3, l, seg: i, dir: 1, km });
+      }
+    }
+  });
+  const paths = []; // [o, d, tons, edges]
+  const loads = lines.map(ln => [new Float64Array(Math.max(0, ln.stops.length - 1)), new Float64Array(Math.max(0, ln.stops.length - 1))]);
+  const ll = i => ({ lat: m.nodes[i].lat, lon: m.nodes[i].lng });
+  for (let o = 0; o < N; o++) {
+    if (gen[o] <= 0) continue;
+    // 行き先の選び方の分母（読み込んだ範囲の外にも行き先があるので背景を足す）
+    let den = FR.bg;
+    for (let d = 0; d < N; d++) if (d !== o) den += gen[d] * Math.exp(-distKm(ll(o), ll(d)) / FR.lam);
+    const r = (() => {
+      const dist = new Float64Array(adj.length).fill(Infinity), pe = new Array(adj.length).fill(null), pn = new Int32Array(adj.length).fill(-1);
+      dist[o] = 0; const h = [[0, o]];
+      while (h.length) { const [dd, u] = heapPop(h); if (dd > dist[u]) continue; for (const e of adj[u]) { const nd = dd + e.c; if (nd < dist[e.to] - 1e-9) { dist[e.to] = nd; pe[e.to] = e; pn[e.to] = u; heapPush(h, [nd, e.to]); } } }
+      return { dist, pe, pn };
+    })();
+    for (let d = 0; d < N; d++) {
+      if (d === o || r.dist[d] === Infinity || gen[d] <= 0) continue;
+      const dk = distKm(ll(o), ll(d)); if (dk < 3) continue;
+      const T = FR.share * gen[o] * gen[d] * Math.exp(-dk / FR.lam) / den;
+      const ours = r.dist[d] + 2 * FR.dray, road = dk * 1.25, truck = FR.truckFix + road * FR.truckKm + (road / FR.truckSpeed + 1) * FR.vot;
+      const p = 1 / (1 + Math.exp(FR.theta * (ours - truck)));
+      const q = T * p; if (q < 0.01) continue;
+      const edges = []; let u = d, g = 0; while (u !== o && r.pn[u] >= 0 && g++ < 5000) { edges.push(r.pe[u]); u = r.pn[u]; }
+      paths.push({ o, d, q, edges });
+      for (const e of edges) if (e.k === 3) loads[e.l][e.dir][e.seg] += q;
+    }
+  }
+  // 積める量（1日の便数×1便の積載量）を超える区間があれば、そこを通る荷物を減らす
+  const capOf = ln => ln.perDay * ln.cap;
+  for (const P_ of paths) {
+    let f = 1; for (const e of P_.edges) if (e.k === 3) { const ld = loads[e.l][e.dir][e.seg], cp = capOf(lines[e.l]); if (ld > cp) f = Math.min(f, cp / ld); }
+    P_.q *= f;
+  }
+  const res = lines.map(ln => ({ tons: 0, tkm: 0, revenue: 0, load: [new Array(Math.max(0, ln.stops.length - 1)).fill(0), new Array(Math.max(0, ln.stops.length - 1)).fill(0)], cap: capOf(ln) }));
+  const nodes = Array.from(gen, g => ({ gen: g, tons: 0 }));
+  let tons = 0, tkm = 0;
+  for (const P_ of paths) {
+    tons += P_.q; nodes[P_.o].tons += P_.q; nodes[P_.d].tons += P_.q;
+    for (const e of P_.edges) {
+      if (e.k === 1) res[e.l].tons += P_.q;
+      else if (e.k === 3) { const x = res[e.l]; x.load[e.dir][e.seg] += P_.q; x.tkm += P_.q * e.km; x.revenue += P_.q * e.km * lines[e.l].rate; tkm += P_.q * e.km; }
+    }
+  }
+  for (const x of res) x.maxLoad = Math.max(0, ...x.load[0], ...x.load[1]) / (x.cap || 1);
+  return { lines: res, nodes, tons, tkm, gen: gen.reduce((a, b) => a + b, 0) };
 }
 
 // ---------- 乗換案内（最速／混雑を避ける） ----------
@@ -1104,7 +1192,7 @@ async function ensureTilesAround(points, R, maxTiles, ver) {
 
 // ---------- 地域（ゾーン）と移動量 ----------
 // 霞が関・八重洲くらいの「町名」の単位で地域をつくる（区・市などの大きな単位は使わない）
-let zoneGran = 0, areaVer = 0;
+let zoneGran = 0, areaVer = 0, freightVer = 0;
 const RANK = { quarter: 3, neighbourhood: 2, suburb: 2, village: 2, hamlet: 1 };
 function computeZones(gran) {
   let loaded = [...cells.values()].filter(c => c.pop >= 1 || c.jobs >= 1);
@@ -1223,6 +1311,12 @@ onmessage = async (ev) => {
     if (ver !== latestVer) return;
     postMessage({ type: 'result', res, ms: performance.now() - t0, failed, reqId: m.reqId });
     postZones();
+  } else if (m.type === 'freight') {
+    const ver = ++freightVer;
+    await ensureTilesAround(m.nodes, FR.R, 25 * m.nodes.length, null);
+    if (ver !== freightVer) return;
+    let res; try { res = computeFreight(m); } catch (e) { postMessage({ type: 'error', msg: '貨物の計算でエラー: ' + e.message }); return; }
+    postMessage({ type: 'freight', res });
   } else if (m.type === 'name') {
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], 1500, 12, null);
     postMessage({ type: 'name', id: m.id, name: nearestPlaceName(m.lat, m.lng), names: nearestPlaceNames(m.lat, m.lng) });
@@ -1265,6 +1359,15 @@ const COST = {
 const BRIDGE_KM = 120e8;        // 地上線の橋梁（川・海の上）1kmあたり
 const RAIL = { carCost: 1.5e8, carCap: 150, kmBase: 600, kmPerCar: 240, vehicle: 15e8, kmCost: 3000, stDay: 20e4, speed: 25, dwell: 30, turn: 180, cap: 1500, unit: '編成' };
 const BUS = { vehicle: 3e7, kmCost: 600, stDay: 2000, speed: 5, dwell: 20, turn: 300, cap: 70, unit: '台', stop: 5e6 };
+// フェリー（旅客と、車両甲板に積むトラックの貨物）。港は30億円
+const FERRY = { vehicle: 40e8, kmCost: 12000, stDay: 30e4, speed: 8, dwell: 600, turn: 1200, cap: 600, cargo: 400, unit: '隻', port: 30e8 };
+// トラック便（貨物ターミナル間の幹線輸送）と貨物列車
+const TRUCK = { vehicle: 1.5e7, kmCost: 180, stDay: 5e4, speed: 11, dwell: 1800, turn: 1800, cap: 10, unit: '台', depot: 5e8 };
+const FRT = { vehicle: 8e8, kmCost: 2500, speed: 20, dwell: 1800, turn: 2400, cap: 650, unit: '編成' };
+const FRATE = { freight: 12, truck: 25, ferry: 12 };   // 運賃（円/トンキロ）
+const PER_DAY = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48]; // 貨物の1日の便数（片道）
+const FERRY_HW = [15, 20, 30, 45, 60, 90, 120, 180, 240];
+const SINGLE_RATE = 0.5;        // 単線は建設費が半分、列車の本数も半分
 const ECON = 30;                // 1日の収支を30日分として計上（ゲーム速度調整）
 const COLORS = ['#e5171f', '#0079c2', '#f39700', '#009944', '#9b7cb6', '#00a7db', '#d7a800', '#e85298', '#8f4e2f', '#6cbb5a', '#333333', '#00ada9'];
 const BUS_COLORS = ['#1565c0', '#2e7d32', '#ad1457', '#6a1b9a', '#ef6c00', '#00838f', '#5d4037', '#455a64'];
@@ -1288,7 +1391,7 @@ const LD = new Map();                 // 路線の派生データ（経路・ダ
 const CO_COLORS = ['#0b6e4f', '#c0392b', '#2c6fbb', '#8e44ad', '#d68910', '#16a085'];
 const REGIONS = { '首都圏（東京）': [139.767, 35.681], '関西（大阪）': [135.4959, 34.7025], '中京（名古屋）': [136.8815, 35.1709], '福岡': [130.4207, 33.5897], '札幌': [141.3508, 43.0687], '仙台': [140.8819, 38.2601], '広島': [132.4757, 34.3976], '新潟': [139.0612, 37.9122], '愛媛（松山）': [132.7590, 33.8390] };
 const ui = { me: 1, zoneR: 6000, zones: { on: false, gran: 1200, data: null }, tool: 'select', level: 0, drawing: null, lineBuild: null, sel: null, speed: 1, heat: 'none', cursor: null, mode: 'blank', colorMode: 'line', route: null, radius: 'auto', ptMode: 'all' };
-let demand = null, cellsData = null, cellIndex = new Map();
+let demand = null, fdemand = null, cellsData = null, cellIndex = new Map();
 let map, worker, mapReady = false, reqId = 0, demandTimer = null, lastReq = null;
 const pending = new Map();            // ワーカーへの問い合わせの返事待ち
 // ---------- オンライン対戦（PeerJS・招待コード） ----------
@@ -1531,23 +1634,38 @@ const colorDist = (a, b) => { const h = x => [1, 3, 5].map(i => parseInt(String(
 const ACCESS_DEFAULT = { allow: true, trackFee: 1000, stationFee: 3000 }; // 線路使用料（円/編成キロ）、駅使用料（円/停車1回）
 const accessOf = cid => ({ ...ACCESS_DEFAULT, ...(coById(cid)?.access || {}) });
 // バス停は共用（どの会社のバスも止まれ、使用料もかからない）
-const usableBy = (x, cid) => !!x && (isBus(x) || (x.owner ?? 1) === cid || accessOf(x.owner ?? 1).allow);
+// バス停・港・トラックターミナルは共用（どの会社も使え、使用料もかからない）
+const usableBy = (x, cid) => !!x && (isBus(x) || isPort(x) || isDepot(x) || (x.owner ?? 1) === cid || accessOf(x.owner ?? 1).allow);
 const myCo = () => coById(ui.me) || G.companies[0];
 const mine = x => x && (x.owner ?? 1) === ui.me;
 const isBus = x => x && (x.kind === 'bus' || x.mode === 'bus');
-const spec = L => isBus(L) ? BUS : RAIL;
+const isPort = s => !!s && s.kind === 'port', isDepot = s => !!s && s.kind === 'depot';
+const isRailSt = s => !!s && (s.kind ?? 'rail') === 'rail';
+const isRail = L => !!L && (!L.mode || L.mode === 'rail');          // 旅客の鉄道路線
+const isFerry = L => !!L && L.mode === 'ferry';
+const isCargoL = L => !!L && (L.mode === 'freight' || L.mode === 'truck'); // 貨物専用の路線
+const onTrack = L => !!L && (!L.mode || L.mode === 'rail' || L.mode === 'freight'); // 線路の上を走る
+// 貨物を扱う拠点：貨物駅（貨物の取り扱いのある鉄道駅）・港・トラックターミナル
+const isCargoNode = s => !!s && (isPort(s) || isDepot(s) || (isRailSt(s) && !!s.cargo));
+const spec = L => ({ bus: BUS, ferry: FERRY, truck: TRUCK, freight: FRT }[L?.mode] || RAIL);
+const MODE_NAME = { rail: '鉄道', bus: 'バス', ferry: '航路', truck: 'トラック便', freight: '貨物列車' };
+const stDayOf = s => isBus(s) ? BUS.stDay : isPort(s) ? FERRY.stDay : isDepot(s) ? TRUCK.stDay : RAIL.stDay * (s.single ? 0.6 : 1) + (s.cargo ? 8e4 : 0);
 const CARS = Array.from({ length: 15 }, (_, i) => i + 1); // 1〜15両
 const carsOf = L => L.cars || 10;
 // 1編成（バスは1台）の定員・値段、1編成キロあたりの運行費。鉄道は両数で変わる
-const vehCap = L => isBus(L) ? BUS.cap : carsOf(L) * RAIL.carCap;
-const vehCost = L => isBus(L) ? BUS.vehicle : carsOf(L) * RAIL.carCost;
-const kmCostOf = L => isBus(L) ? BUS.kmCost : RAIL.kmBase + RAIL.kmPerCar * carsOf(L);
-const stopWord = s => isBus(s) ? 'バス停' : '駅';
+const vehCap = L => isRail(L) ? carsOf(L) * RAIL.carCap : spec(L).cap;
+const vehCost = L => isRail(L) ? carsOf(L) * RAIL.carCost : spec(L).vehicle;
+const kmCostOf = L => isRail(L) ? RAIL.kmBase + RAIL.kmPerCar * carsOf(L) : spec(L).kmCost;
+const stopWord = s => isBus(s) ? 'バス停' : isPort(s) ? '港' : isDepot(s) ? 'ターミナル' : '駅';
+const capUnit = L => isCargoL(L) ? 't' : '人';
+// 単線の区間がある路線は列車の本数が半分（運転間隔が2倍）
+const singleOf = L => !!LD.get(L.id)?.single;
+const effPerDay = L => { const n = L.perDay || 4; return singleOf(L) ? Math.max(1, Math.floor(n * SINGLE_RATE)) : n; };
 
 // ---------- ゲーム状態 ----------
 // バスの対キロ運賃（1回の乗車あたり）
 function busFareOf(km, f) { return f.busMode === 'dist' ? Math.round((f.busBase + Math.max(0, Math.ceil(km - f.busFreeKm)) * f.busPerKm) / 10) * 10 : f.bus; }
-const defaultFare = () => ({ base: 150, perKm: 18, bus: 210, busMode: 'flat', busBase: 180, busFreeKm: 2, busPerKm: 40 });
+const defaultFare = () => ({ base: 150, perKm: 18, bus: 210, busMode: 'flat', busBase: 180, busFreeKm: 2, busPerKm: 40, ferryBase: 500, ferryPerKm: 25 });
 const START_MONEY = { 'たっぷり（1兆円）': 1e12, '多め（3,000億円）': 3e11, 'ふつう（1,000億円）': 1e11, '少なめ（300億円）': 3e10 };
 function newCompany(id, name, slot) {
   return { id, name: name || '首都圏新交通', color: CO_COLORS[slot % CO_COLORS.length], money: G?.startMoney ?? 1e11, fare: defaultFare(), hist: [], lineNo: 1, busNo: 1 };
@@ -1555,7 +1673,7 @@ function newCompany(id, name, slot) {
 function newGame(mode, company, region, money) {
   G = { v: 3, mode, region, t: 6 * 3600, day: 0, companies: [], stations: [], tracks: [], lines: [], nid: 2, startMoney: money || 1e11, idle: true, idleMax: 30 };
   G.companies.push(newCompany(1, company, 0)); ui.me = 1;
-  LD.clear(); demand = null;
+  LD.clear(); demand = null; fdemand = null;
 }
 function migrate(g) {
   if (!g.companies) { // 1社だけのセーブデータ（v2以前）
@@ -1609,7 +1727,7 @@ const svcColor = t => (SVC_TYPES[t] || SVC_TYPES['普通']).color;
 const canTurn = (L, id) => id === L.stops[0] || id === L.stops[L.stops.length - 1] || !!stById(id)?.turnback;
 function services(L) {
   const out = [{ key: 'base', type: '普通', idx: L.stops.map((_, i) => i), hp: L.hp, ho: L.ho, sur: 0, fleet: L.fleet }];
-  if (isBus(L)) return out;
+  if (!isRail(L)) return out;
   for (const s of L.svc || []) {
     const set = new Set(s.stops), n = L.stops.length;
     // 区間運転：from / to が空なら路線の端まで
@@ -1622,6 +1740,8 @@ function services(L) {
     const idx = L.stops.map((id, i) => (i >= a && i <= b && (i === a || i === b || all || set.has(id))) ? i : -1).filter(i => i >= 0);
     out.push({ key: s.id, type: s.type, idx, hp: s.hp, ho: s.ho, sur: s.sur || 0, fleet: s.fleet || 0, ref: s, part: a > 0 || b < n - 1, bad });
   }
+  // 単線の区間があると、すれ違いの待ち合わせで走れる列車が半分になる（運転間隔が2倍）
+  if (singleOf(L)) for (const o of out) { o.hp = (o.hp || 0) / SINGLE_RATE; o.ho = (o.ho || 0) / SINGLE_RATE; }
   return out;
 }
 const svcCap = (L, sv) => vehCap(L) * (sv.sur > 0 ? SEAT_RATE : 1);
@@ -1733,7 +1853,7 @@ function buildTimetable(L, d) {
   return { trains: all, svcLeg, dropped, passing };
 }
 function ensureTT(L) {
-  const d = LD.get(L.id); if (!d || isBus(L)) return null;
+  const d = LD.get(L.id); if (!d || !isRail(L)) return null;
   if (!d.tt) d.tt = buildTimetable(L, d);
   return d.tt;
 }
@@ -1781,7 +1901,8 @@ const straight = (a, b) => [[a.lng, a.lat], [b.lng, b.lat]];
 function deriveLine(L, adj) {
   const sp = spec(L), legs = [];
   for (let i = 0; i < L.stops.length - 1; i++) {
-    if (isBus(L)) {
+    if (!onTrack(L)) {
+      if (!stById(L.stops[i]) || !stById(L.stops[i + 1])) return null;
       const coords = L.legs?.[i] || straight(stById(L.stops[i]), stById(L.stops[i + 1]));
       legs.push({ tracks: [], coords, len: polyLen(coords) });
     } else {
@@ -1794,25 +1915,32 @@ function deriveLine(L, adj) {
   let coords = []; const stopDist = [0]; let acc = 0;
   for (const g of legs) { coords = coords.length ? coords.concat(g.coords.slice(1)) : g.coords.slice(); acc += g.len; stopDist.push(acc); }
   const cum = [0]; for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + hav(coords[i - 1], coords[i]));
-  const legT = legs.map(g => (g.run ?? g.len / sp.speed) + (isBus(L) ? 0 : 40) + sp.dwell);
+  // 貨物列車は旅客列車より遅い（最高速度を抑える）
+  const legT = legs.map(g => (L.mode === 'freight' && g.run != null ? Math.max(g.run, g.len / FRT.speed) : (g.run ?? g.len / sp.speed)) + (onTrack(L) ? 40 : 0) + sp.dwell);
   // 往復の運行パターン（時刻→位置）
   const tl = []; let t = 0;
   const push = (dt, d0, d1) => { tl.push({ t0: t, t1: t + dt, d0, d1 }); t += dt; };
   for (let i = 0; i < legs.length; i++) { push(i === 0 ? sp.turn : sp.dwell, stopDist[i], stopDist[i]); push(legT[i] - sp.dwell, stopDist[i], stopDist[i + 1]); }
   for (let i = legs.length - 1; i >= 0; i--) { push(i === legs.length - 1 ? sp.turn : sp.dwell, stopDist[i + 1], stopDist[i + 1]); push(legT[i] - sp.dwell, stopDist[i + 1], stopDist[i]); }
-  return { legs, coords, cum, stopDist, legT, len: acc, tl, cycle: t };
+  // 単線：線路か駅のどこかが単線なら、路線全体の本数が半分
+  const single = onTrack(L) && (legs.some(g => g.tracks.some(p => tkById(p.id)?.single)) || L.stops.some(id => stById(id)?.single));
+  return { legs, coords, cum, stopDist, legT, len: acc, tl, cycle: t, single };
 }
 function vehiclesNeeded(L) {
   const d = LD.get(L.id); if (!d) return 0;
-  if (isBus(L)) return Math.max(1, Math.ceil(d.cycle / (Math.min(L.hp, L.ho) * 60)));
+  if (isCargoL(L)) return Math.max(1, Math.ceil(d.cycle * effPerDay(L) / (20 * 3600))); // 1日20時間運行
+  if (!isRail(L)) return Math.max(1, Math.ceil(d.cycle / (Math.min(L.hp, L.ho) * 60)));
   return services(L).reduce((a, sv, si) => a + svcVehicles(L, sv, si), 0);
 }
 // 1日の走行キロ（編成キロ・台キロ）
 function lineTrainKm(L) {
   const d = LD.get(L.id); if (!d) return 0;
-  if (isBus(L)) return (4 * 60 / L.hp + 15 * 60 / L.ho) * 2 * d.len / 1000;
+  if (isCargoL(L)) return effPerDay(L) * 2 * d.len / 1000;
+  if (!isRail(L)) return tripsOf(L) * 2 * d.len / 1000;
   return services(L).reduce((a, sv) => a + svcTrainKm(L, sv), 0);
 }
+// バス・フェリーの片道の1日の便数
+const tripsOf = L => (L.hp ? 4 * 60 / L.hp : 0) + (L.ho ? 15 * 60 / L.ho : 0);
 // 路線の色は会社の色に固定（会社が見分けやすいように）
 function syncColors() { for (const L of G.lines) { const c = coById(L.owner ?? 1)?.color; if (c) L.color = c; } }
 function rebuildLines() {
@@ -1821,29 +1949,34 @@ function rebuildLines() {
   const adj = trackAdj(); LD.clear();
   const broken = [];
   for (const L of G.lines) { const d = L.stops.length >= 2 ? deriveLine(L, adj) : null; if (d) LD.set(L.id, d); else broken.push(L); }
-  for (const L of broken) { G.lines = G.lines.filter(x => x !== L); toast(`${L.name}は${isBus(L) ? 'バス停が足りなくなった' : '線路が途切れた'}ため廃止しました`); }
+  for (const L of broken) { G.lines = G.lines.filter(x => x !== L); toast(`${L.name}は${onTrack(L) ? '線路が途切れた' : '停留所・港が足りなくなった'}ため廃止しました`); }
 }
 // 他社の線路・駅を使う分の使用料（1日あたり）。持ち主の会社ごとに返す
 function accessFees(L) {
   const out = new Map(), d = LD.get(L.id); if (!d) return out;
   const me = L.owner ?? 1, add = (cid, y) => { if (cid !== me && y > 0) out.set(cid, (out.get(cid) || 0) + y); };
-  if (!isBus(L)) {
+  if (onTrack(L)) {
     const tkm = lineTrainKm(L), len = (d.len || 1) / 1000, seen = new Set();
     for (const g of d.legs) for (const p of g.tracks) { if (seen.has(p.id)) continue; seen.add(p.id); const t = tkById(p.id); add(t.owner ?? 1, tkm * (t.len / 1000 / len) * accessOf(t.owner ?? 1).trackFee); }
-    services(L).forEach(sv => { const trips = ((sv.hp ? 4 * 60 / sv.hp : 0) + (sv.ho ? 15 * 60 / sv.ho : 0)) * 2; for (const i of sv.idx) { const st = stById(L.stops[i]); add(st.owner ?? 1, trips * accessOf(st.owner ?? 1).stationFee); } });
-  } else {
-    const trips = (4 * 60 / L.hp + 15 * 60 / L.ho) * 2;
-    // バス停は共用なので使用料なし
+    if (L.mode === 'freight') { const trips = effPerDay(L) * 2; for (const id of L.stops) { const st = stById(id); add(st.owner ?? 1, trips * accessOf(st.owner ?? 1).stationFee); } }
+    else services(L).forEach(sv => { const trips = ((sv.hp ? 4 * 60 / sv.hp : 0) + (sv.ho ? 15 * 60 / sv.ho : 0)) * 2; for (const i of sv.idx) { const st = stById(L.stops[i]); add(st.owner ?? 1, trips * accessOf(st.owner ?? 1).stationFee); } });
+    // 使用料の上限は、その路線の運賃収入（平日1日）の5分の1。超える分は会社ごとの割合で減らす
+    const tot = sumFees(out), cap = lineRevenue(L) / 5;
+    if (demandReady() && tot > cap) for (const [k, v] of out) out.set(k, tot > 0 ? v * cap / tot : 0);
   }
+  // バス停・港・トラックターミナルは共用なので使用料なし
   return out;
 }
+// 路線の運賃収入（平日1日）：旅客＋貨物
+const lineRevenue = L => (demand?.ln.get(L.id)?.revenue || 0) + (fdemand?.ln.get(L.id)?.revenue || 0);
+const demandReady = () => !!demand || !!fdemand;
 // 線路・駅を何路線が使っているか（路線網が変わるまで使い回す）
 function econUse() {
   if (econUse.c && econUse.lines === G.lines && econUse.v === econUse.ver) return econUse.c;
   const tk = new Map(), st = new Map();
   for (const M of G.lines) {
     for (const sid of new Set(M.stops)) st.set(sid, (st.get(sid) || 0) + 1);
-    const dm = LD.get(M.id); if (!dm || isBus(M)) continue;
+    const dm = LD.get(M.id); if (!dm || !onTrack(M)) continue;
     const seen = new Set(); for (const g of dm.legs) for (const p of g.tracks) seen.add(p.id);
     for (const id of seen) tk.set(id, (tk.get(id) || 0) + 1);
   }
@@ -1858,20 +1991,20 @@ function lineEcon(L) {
   const op = lineTrainKm(L) * kmCostOf(L);
   let share = 0;
   const U = econUse();
-  if (!isBus(L)) {
+  if (onTrack(L)) {
     const seen = new Set(); for (const g of d.legs) for (const p of g.tracks) seen.add(p.id);
-    for (const id of seen) { const t = tkById(id); if (t) share += t.len / 1000 * COST[t.level].maint / (U.tk.get(id) || 1); }
+    for (const id of seen) { const t = tkById(id); if (t) share += trackMaint(t) / (U.tk.get(id) || 1); }
   }
-  for (const sid of new Set(L.stops)) { const s = stById(sid); if (!s) continue; share += (isBus(s) ? BUS.stDay : RAIL.stDay) / (U.st.get(sid) || 1); }
+  for (const sid of new Set(L.stops)) { const s = stById(sid); if (!s) continue; share += stDayOf(s) / (U.st.get(sid) || 1); }
   const fee = sumFees(accessFees(L));
-  const r = demand?.ln.get(L.id), rev = r ? r.revenue : 0, cost = op + share + fee;
+  const rev = lineRevenue(L), cost = op + share + fee;
   return { rev, cost, op, share, fee, profit: rev - cost, coef: rev > 0 ? cost / rev * 100 : null };
 }
 function dayCosts(cid = ui.me) {
   let op = 0;
   for (const L of G.lines) { if ((L.owner ?? 1) !== cid) continue; const d = LD.get(L.id); if (!d) continue; op += lineTrainKm(L) * kmCostOf(L); }
-  const maint = G.tracks.reduce((s, t) => s + ((t.owner ?? 1) === cid ? t.len / 1000 * COST[t.level].maint : 0), 0);
-  const st = G.stations.reduce((s, x) => s + ((x.owner ?? 1) === cid ? (isBus(x) ? BUS.stDay : RAIL.stDay) : 0), 0);
+  const maint = G.tracks.reduce((s, t) => s + ((t.owner ?? 1) === cid ? trackMaint(t) : 0), 0);
+  const st = G.stations.reduce((s, x) => s + ((x.owner ?? 1) === cid ? stDayOf(x) : 0), 0);
   // 乗り入れの使用料：払う分（自社の路線が他社の設備を使う）と、受け取る分（他社の路線が自社の設備を使う）
   let fee = 0, feeIn = 0;
   for (const L of G.lines) { const f = accessFees(L); if ((L.owner ?? 1) === cid) fee += sumFees(f); else feeIn += f.get(cid) || 0; }
@@ -1879,11 +2012,13 @@ function dayCosts(cid = ui.me) {
 }
 // 会社ごとの運賃収入（平日の路線収入の合計に、土休日の増減をかける）
 function coRevenue(cid, day) {
-  if (!demand) return 0;
-  const wk = demand.rev.reduce((a, b) => a + b, 0) || 1, f = dayRevenue(day) / wk;
-  let r = 0; for (const L of G.lines) if ((L.owner ?? 1) === cid) r += demand.ln.get(L.id)?.revenue || 0;
-  return r * f;
+  let r = 0, fr = 0;
+  const wk = demand ? demand.rev.reduce((a, b) => a + b, 0) || 1 : 1, f = demand ? dayRevenue(day) / wk : 0;
+  for (const L of G.lines) if ((L.owner ?? 1) === cid) { r += demand?.ln.get(L.id)?.revenue || 0; fr += fdemand?.ln.get(L.id)?.revenue || 0; }
+  // 貨物は土休日に減る
+  return r * f + fr * (dayFactors(day).holiday ? 0.6 : 1);
 }
+const trackMaint = t => t.len / 1000 * COST[t.level].maint * (t.single ? SINGLE_RATE : 1);
 function coRiders(cid) { if (!demand) return 0; let r = 0; for (const L of G.lines) if ((L.owner ?? 1) === cid) r += demand.ln.get(L.id)?.riders || 0; return r; }
 function dayFactors(day) { const w = dateOf(day).getDay(); return { holiday: w === 0 || w === 6 }; }
 // 土休日は通勤・通学が減り、買い物・レジャー・観光が増える
@@ -1928,12 +2063,20 @@ function initWorker(tileUrl) {
     else if (m.type === 'error') { setStatus(m.msg); requestDemand.busy = false; requestDemand.key = null; }
     else if (m.type === 'name') {
       const s = stById(m.id);
-      if (s && s.autoName && m.name && NET.role !== 'client') { const nm = isBus(s) ? busStopName(s, m.names || m.name) : uniqueName(m.name, s, [s.lng, s.lat]); if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); } }
+      if (s && s.autoName && m.name && NET.role !== 'client') { const nm = isBus(s) ? busStopName(s, m.names || m.name) : kindName(s) ? simpleName(m.name, kindName(s), s) : uniqueName(m.name, s, [s.lng, s.lat]); if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); } }
     }
     else if (m.type === 'censusOk') { setStatus(`統計データ ${fmtNum(m.n)}メッシュを使用中`); requestDemand(); }
     else if (m.type === 'busroute') { const cb = pending.get(m.key); pending.delete(m.key); if (cb) cb(m.coords); }
     else if (m.type === 'route') { if (window.__perf) console.log('[perf] route worker ms', Math.round(m.ms)); if (ui.route && ui.route.reqId === m.reqId) { ui.route.fast = m.fast; ui.route.avoid = m.avoid; ui.route.loading = false; renderPanel(); renderPreview(); } }
     else if (m.type === 'zones') { if (window.__perf) console.log('[perf] zones ms', Math.round(m.ms)); ui.zones.data = m; setStatus(`地域 ${m.zones.length}か所の移動量を表示中`); renderZones(); if (ui.sel?.type === 'zone' || (!ui.sel && !ui.lineBuild && ui.tool === 'select')) renderPanel(); }
+    else if (m.type === 'freight') {
+      if (!lastFReq || m.res.lines.length !== lastFReq.lineIds.length) return;
+      fdemand = { ln: new Map(), st: new Map(), tons: m.res.tons, gen: m.res.gen, tkm: m.res.tkm };
+      m.res.lines.forEach((l, i) => fdemand.ln.set(lastFReq.lineIds[i], l));
+      m.res.nodes.forEach((n, i) => fdemand.st.set(lastFReq.nodeIds[i], n));
+      if (ui.colorMode === 'profit') renderNetwork();
+      if (!ui.lineBuild && ui.tool !== 'route') renderPanel();
+    }
     else if (m.type === 'result') {
       if (m.reqId !== reqId) return;
       requestDemand.busy = false;
@@ -1971,14 +2114,16 @@ function requestDemand() {
   clearTimeout(demandTimer);
   demandTimer = setTimeout(() => {
     if (!worker) return;
-    const used = new Set(); G.lines.forEach(L => L.stops.forEach(s => used.add(s)));
+    requestFreight();
+    // 旅客：貨物専用の路線（貨物列車・トラック便）は除く
+    const lines = G.lines.filter(L => LD.has(L.id) && !isCargoL(L));
+    const used = new Set(); lines.forEach(L => L.stops.forEach(s => used.add(s)));
     const stations = G.stations.filter(s => used.has(s.id));
     const idx = new Map(stations.map((s, i) => [s.id, i]));
-    const lines = G.lines.filter(L => LD.has(L.id));
     // 鉄道は種別（普通・快速など）ごとに別の「運行系統」として計算する
     const svcs = [];
     for (const L of lines) {
-      if (isBus(L)) { svcs.push({ L, sv: services(L)[0], si: 0 }); continue; }
+      if (!isRail(L)) { svcs.push({ L, sv: services(L)[0], si: 0 }); continue; }
       const tt = ensureTT(L);
       services(L).forEach((sv, si) => { if ((sv.hp || sv.ho) && sv.idx.length >= 2) svcs.push({ L, sv, si, tt }); });
     }
@@ -1989,7 +2134,12 @@ function requestDemand() {
       stations: stations.map(s => ({ lng: s.lng, lat: s.lat, kind: s.kind })),
       lines: svcs.map(({ L, sv, si, tt }) => {
         const co = Math.max(0, G.companies.findIndex(c => c.id === (L.owner ?? 1))), d = LD.get(L.id);
-        if (!tt) return { co, mode: L.mode, cap: vehCap(L), stops: L.stops.map(s => idx.get(s)), legT: d.legT, legL: d.legs.map(g => g.len), hp: L.hp, ho: L.ho };
+        if (!tt) {
+          const o = { co, mode: L.mode, cap: vehCap(L), stops: L.stops.map(s => idx.get(s)), legT: d.legT, legL: d.legs.map(g => g.len), hp: L.hp, ho: L.ho };
+          // フェリー：乗るときに基本運賃、乗った距離に応じてキロ運賃
+          if (isFerry(L)) { const f = coById(L.owner ?? 1)?.fare || defaultFare(); o.sur = f.ferryBase; o.fpk = f.ferryPerKm; }
+          return o;
+        }
         const lg = tt.svcLeg[si];
         return { co, grp: L.id, mode: 'rail', cap: svcCap(L, sv), sur: sv.sur, stops: sv.idx.map(i => idx.get(L.stops[i])), legT: lg.legT, legTo: lg.legTo, legL: lg.legL, hp: sv.hp, ho: sv.ho };
       }),
@@ -2002,6 +2152,22 @@ function requestDemand() {
     msg.reqId = ++reqId; worker.postMessage(msg);
   }, 500);
 }
+// 貨物：拠点（貨物駅・港・トラックターミナル）の間の荷物の流れを計算する
+function requestFreight() {
+  const lines = G.lines.filter(L => LD.has(L.id) && (isCargoL(L) || (isFerry(L) && L.stops.every(id => isPort(stById(id))))));
+  if (!lines.length) { if (fdemand) { fdemand = null; renderPanel(); } requestFreight.key = null; lastFReq = null; return; }
+  const used = new Set(); lines.forEach(L => L.stops.forEach(s => used.add(s)));
+  const nodes = G.stations.filter(s => used.has(s.id)), idx = new Map(nodes.map((s, i) => [s.id, i]));
+  const msg = {
+    type: 'freight', nodes: nodes.map(s => ({ lng: s.lng, lat: s.lat, kind: s.kind })),
+    lines: lines.map(L => { const d = LD.get(L.id); return { mode: L.mode, stops: L.stops.map(id => idx.get(id)), legT: d.legT, legL: d.legs.map(g => g.len), perDay: isFerry(L) ? tripsOf(L) : effPerDay(L), cap: isFerry(L) ? FERRY.cargo : spec(L).cap, rate: FRATE[L.mode] }; }),
+  };
+  const key = JSON.stringify(msg);
+  if (key === requestFreight.key && fdemand) return;
+  requestFreight.key = key; lastFReq = { nodeIds: nodes.map(s => s.id), lineIds: lines.map(L => L.id) };
+  worker.postMessage(msg);
+}
+let lastFReq = null;
 function askBusRoute(a, b, cb) {
   const key = Math.random().toString(36).slice(2);
   pending.set(key, cb);
@@ -2066,11 +2232,13 @@ function applyModeLayers() {
 }
 let waterLayers = [];
 const W = (z0, v0, z1, v1) => ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1];
+// 単線の線路は細く描く
+const WS = (z0, v0, z1, v1) => ['interpolate', ['linear'], ['zoom'], z0, ['case', ['get', 'sg'], v0 * 0.5, v0], z1, ['case', ['get', 'sg'], v1 * 0.5, v1]];
 async function onMapLoad() {
   japanizeLabels();
   waterLayers = map.getStyle().layers.filter(l => l['source-layer'] === 'water' && l.type === 'fill').map(l => l.id);
   const empty = { type: 'FeatureCollection', features: [] };
-  for (const s of ['airports', 'zones', 'zoneflows', 'mesh', 'tracks', 'lines', 'buslines', 'route', 'stations', 'trains', 'preview']) map.addSource(s, { type: 'geojson', data: empty });
+  for (const s of ['airports', 'zones', 'zoneflows', 'mesh', 'tracks', 'lines', 'buslines', 'otherlines', 'route', 'stations', 'trains', 'preview']) map.addSource(s, { type: 'geojson', data: empty });
   const firstSymbol = map.getStyle().layers.find(l => l.type === 'symbol')?.id;
   const add = l => map.addLayer(l);
   map.addLayer({ id: 'mesh', type: 'fill', source: 'mesh', layout: { visibility: 'none' }, paint: { 'fill-color': '#fdae6b', 'fill-opacity': 0.5 } }, firstSymbol);
@@ -2079,16 +2247,21 @@ async function onMapLoad() {
     'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 10, ['*', ['get', 'r'], 0.45], 12, ['get', 'r'], 14, ['*', ['get', 'r'], 2.2]],
     'circle-color': ['interpolate', ['linear'], ['get', 'pt'], 0, '#9aa5b1', 0.3, '#6fb0d8', 0.6, '#2e8b57'],
     'circle-opacity': ['case', ['get', 'sel'], 0.6, ['get', 'hov'], 0.5, 0.32], 'circle-stroke-color': ['case', ['get', 'sel'], '#ff3b30', '#4a5560'], 'circle-stroke-width': ['case', ['get', 'sel'], 3, ['get', 'hov'], 2.5, 1.2] } });
-  add({ id: 'tk-under', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], -1], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#7d838a', 'line-width': W(10, 3, 15, 9), 'line-dasharray': [1.2, 0.9], 'line-opacity': 0.8 } });
-  add({ id: 'tk-ground', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 0], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#5f646b', 'line-width': W(10, 3, 15, 9) } });
-  add({ id: 'tk-elev', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b2f34', 'line-width': W(10, 5, 15, 13) } });
-  add({ id: 'tk-elev-in', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#c9ccd0', 'line-width': W(10, 2, 15, 7) } });
+  add({ id: 'tk-under', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], -1], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#7d838a', 'line-width': WS(10, 3, 15, 9), 'line-dasharray': [1.2, 0.9], 'line-opacity': 0.8 } });
+  add({ id: 'tk-ground', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 0], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#5f646b', 'line-width': WS(10, 3, 15, 9) } });
+  add({ id: 'tk-elev', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b2f34', 'line-width': WS(10, 5, 15, 13) } });
+  add({ id: 'tk-elev-in', type: 'line', source: 'tracks', filter: ['==', ['get', 'lv'], 1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#c9ccd0', 'line-width': WS(10, 2, 15, 7) } });
   add({ id: 'tk-sel', type: 'line', source: 'tracks', filter: ['==', ['get', 'id'], -1], paint: { 'line-color': '#ff3b30', 'line-width': 10, 'line-opacity': 0.6 } });
   add({ id: 'tk-hit', type: 'line', source: 'tracks', paint: { 'line-color': '#000', 'line-width': 16, 'line-opacity': 0 } });
   add({ id: 'bus-sel', type: 'line', source: 'buslines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 5, 15, 10), 'line-offset': ['get', 'off'] } });
   add({ id: 'bus-line', type: 'line', source: 'buslines', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 1.5, 15, 3.5), 'line-offset': ['get', 'off'], 'line-dasharray': [2, 1] } });
+  // 航路（点線・太め）とトラック便（細かい点線）
+  add({ id: 'ot-sel', type: 'line', source: 'otherlines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 6, 15, 12) } });
+  add({ id: 'fe-line', type: 'line', source: 'otherlines', filter: ['==', ['get', 'm'], 'ferry'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 4.5), 'line-dasharray': [3, 2], 'line-opacity': 0.9 } });
+  add({ id: 'tr-line', type: 'line', source: 'otherlines', filter: ['==', ['get', 'm'], 'truck'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 1.5, 15, 3), 'line-dasharray': [0.6, 1.4], 'line-offset': 3 } });
   add({ id: 'ln-sel', type: 'line', source: 'lines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 7, 15, 14), 'line-offset': ['get', 'off'] } });
-  add({ id: 'ln-line', type: 'line', source: 'lines', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 5), 'line-offset': ['get', 'off'] } });
+  add({ id: 'ln-line', type: 'line', source: 'lines', filter: ['!', ['get', 'fr']], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 5), 'line-offset': ['get', 'off'] } });
+  add({ id: 'fl-line', type: 'line', source: 'lines', filter: ['get', 'fr'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2, 15, 4), 'line-offset': ['get', 'off'], 'line-dasharray': [2, 1] } });
   add({ id: 'rt-line', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 6, 15, 12), 'line-opacity': 0.85 } });
   add({ id: 'pv-line', type: 'line', source: 'preview', filter: ['==', ['geometry-type'], 'LineString'], paint: { 'line-color': ['coalesce', ['get', 'color'], '#0b6e4f'], 'line-width': 4, 'line-dasharray': [2, 1.2] } });
   add({ id: 'pv-pt', type: 'circle', source: 'preview', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': ['case', ['has', 'auto'], 4, 5], 'circle-color': ['case', ['has', 'auto'], '#fff', '#0b6e4f'], 'circle-stroke-color': ['case', ['has', 'auto'], '#1565c0', '#fff'], 'circle-stroke-width': 2 } });
@@ -2097,8 +2270,8 @@ async function onMapLoad() {
   add({ id: 'ap-label', type: 'symbol', source: 'airports', layout: { 'text-field': ['get', 'label'], 'text-font': ['Noto Sans Bold'], 'text-size': 12, 'text-offset': [0, 1.3], 'text-anchor': 'top', 'text-optional': true }, paint: { 'text-color': '#37474f', 'text-halo-color': '#fff', 'text-halo-width': 1.6 } });
   map.getSource('airports').setData({ type: 'FeatureCollection', features: AIRPORTS.map((a, i) => ({ type: 'Feature', properties: { i, label: a.name }, geometry: { type: 'Point', coordinates: [a.lng, a.lat] } })) });
   add({ id: 'st-circle', type: 'circle', source: 'stations', paint: {
-    'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['get', 'bus'], 2, 3.5], 15, ['case', ['get', 'bus'], 5, 8]], 'circle-color': '#fff',
-    'circle-stroke-color': ['case', ['get', 'sel'], '#ff3b30', ['get', 'bus'], '#1565c0', '#1d232b'], 'circle-stroke-width': ['case', ['get', 'sel'], 3.5, 2] } });
+    'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['get', 'bus'], 2, 3.5], 15, ['case', ['get', 'bus'], 5, 8]], 'circle-color': ['match', ['get', 'k'], 'port', '#d6ecff', 'depot', '#f3e2cf', '#fff'],
+    'circle-stroke-color': ['case', ['get', 'sel'], '#ff3b30', ['get', 'bus'], '#1565c0', ['==', ['get', 'k'], 'port'], '#0d47a1', ['==', ['get', 'k'], 'depot'], '#795548', ['get', 'cg'], '#795548', '#1d232b'], 'circle-stroke-width': ['case', ['get', 'sel'], 3.5, ['get', 'cg'], 3, 2] } });
   add({ id: 'st-label', type: 'symbol', source: 'stations', filter: ['!', ['get', 'bus']], layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Bold'], 'text-size': W(10, 10, 15, 14), 'text-offset': [0, 1.2], 'text-anchor': 'top', 'text-optional': true }, paint: { 'text-color': '#1d232b', 'text-halo-color': '#fff', 'text-halo-width': 1.6 } });
   add({ id: 'bs-label', type: 'symbol', source: 'stations', minzoom: 13.5, filter: ['get', 'bus'], layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top', 'text-optional': true }, paint: { 'text-color': '#1565c0', 'text-halo-color': '#fff', 'text-halo-width': 1.4 } });
   mapReady = true;
@@ -2131,23 +2304,26 @@ function renderNetwork() {
   renderTrains.dirty = true;
   if (!mapReady || !G) return;
   const selT = ui.sel?.type === 'track' ? ui.sel.id : -1;
-  map.getSource('tracks').setData({ type: 'FeatureCollection', features: G.tracks.map(t => ({ type: 'Feature', properties: { id: t.id, lv: t.level }, geometry: { type: 'LineString', coordinates: t.coords } })) });
+  map.getSource('tracks').setData({ type: 'FeatureCollection', features: G.tracks.map(t => ({ type: 'Feature', properties: { id: t.id, lv: t.level, sg: !!t.single }, geometry: { type: 'LineString', coordinates: t.coords } })) });
   map.setFilter('tk-sel', ['==', ['get', 'id'], selT]);
   colorCache.clear(); if (ui.colorMode === 'profit') for (const L of G.lines) colorCache.set(L.id, coefColor(lineEcon(L).coef));
   // 鉄道（線路ごとに並べて表示）
   const use = new Map();
-  for (const L of G.lines) { if (isBus(L)) continue; const d = LD.get(L.id); if (!d) continue; const seen = new Set(); for (const g of d.legs) for (const p of g.tracks) { if (seen.has(p.id)) continue; seen.add(p.id); if (!use.has(p.id)) use.set(p.id, []); use.get(p.id).push(L); } }
+  for (const L of G.lines) { if (!onTrack(L)) continue; const d = LD.get(L.id); if (!d) continue; const seen = new Set(); for (const g of d.legs) for (const p of g.tracks) { if (seen.has(p.id)) continue; seen.add(p.id); if (!use.has(p.id)) use.set(p.id, []); use.get(p.id).push(L); } }
   const lf = [];
-  for (const [tid, ls] of use) { const t = tkById(tid); ls.forEach((L, i) => lf.push({ type: 'Feature', properties: { lid: L.id, color: lineColor(L), off: (i - (ls.length - 1) / 2) * 5 }, geometry: { type: 'LineString', coordinates: t.coords } })); }
+  for (const [tid, ls] of use) { const t = tkById(tid); ls.forEach((L, i) => lf.push({ type: 'Feature', properties: { lid: L.id, color: lineColor(L), fr: L.mode === 'freight', off: (i - (ls.length - 1) / 2) * 5 }, geometry: { type: 'LineString', coordinates: t.coords } })); }
   map.getSource('lines').setData({ type: 'FeatureCollection', features: lf });
   // バス
   const bf = []; let bi = 0;
   for (const L of G.lines) { if (!isBus(L)) continue; const d = LD.get(L.id); if (!d) continue; bf.push({ type: 'Feature', properties: { lid: L.id, color: lineColor(L), off: (bi++ % 3 - 1) * 2.5 }, geometry: { type: 'LineString', coordinates: d.coords } }); }
   map.getSource('buslines').setData({ type: 'FeatureCollection', features: bf });
+  const of = [];
+  for (const L of G.lines) { if (!isFerry(L) && L.mode !== 'truck') continue; const d = LD.get(L.id); if (!d) continue; of.push({ type: 'Feature', properties: { lid: L.id, m: L.mode, color: lineColor(L) }, geometry: { type: 'LineString', coordinates: d.coords } }); }
+  map.getSource('otherlines').setData({ type: 'FeatureCollection', features: of });
   const selL = ui.sel?.type === 'line' ? ui.sel.id : -1;
-  map.setFilter('ln-sel', ['==', ['get', 'lid'], selL]); map.setFilter('bus-sel', ['==', ['get', 'lid'], selL]);
+  map.setFilter('ln-sel', ['==', ['get', 'lid'], selL]); map.setFilter('bus-sel', ['==', ['get', 'lid'], selL]); map.setFilter('ot-sel', ['==', ['get', 'lid'], selL]);
   const mark = new Set(ui.lineBuild?.stops || []); if (ui.route) { if (ui.route.from) mark.add(ui.route.from); if (ui.route.to) mark.add(ui.route.to); }
-  map.getSource('stations').setData({ type: 'FeatureCollection', features: G.stations.map(s => ({ type: 'Feature', properties: { id: s.id, name: s.name, bus: isBus(s), sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Point', coordinates: [s.lng, s.lat] } })) });
+  map.getSource('stations').setData({ type: 'FeatureCollection', features: G.stations.map(s => ({ type: 'Feature', properties: { id: s.id, name: s.name, bus: isBus(s), k: s.kind || 'rail', cg: !!s.cargo, sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Point', coordinates: [s.lng, s.lat] } })) });
   $('#legend').style.display = ui.colorMode === 'profit' ? 'block' : 'none';
 }
 function renderPreview() {
@@ -2160,11 +2336,16 @@ function renderPreview() {
     ui.drawing.pts.forEach(p => f.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: p } }));
   }
   const lb = ui.lineBuild;
-  if (lb && lb.mode === 'bus') {
+  if (lb && (lb.mode === 'ferry' || lb.mode === 'truck')) {
+    lb.pts.forEach(q => f.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: (p => [p.lng, p.lat])(ptLL(q)) } }));
+    if (lb.mode === 'ferry' && lb.pts.length >= 2) f.push({ type: 'Feature', properties: { color: lb.color }, geometry: { type: 'LineString', coordinates: lb.pts.map(q => (p => [p.lng, p.lat])(ptLL(q))) } });
+    if (lb.mode === 'truck') lb.legs.forEach(c => c && f.push({ type: 'Feature', properties: { color: lb.color }, geometry: { type: 'LineString', coordinates: c } }));
+  }
+  else if (lb && lb.mode === 'bus') {
     lb.pts.forEach(q => f.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: (p => [p.lng, p.lat])(ptLL(q)) } }));
     if (lb.legs.length && lb.legs.length === lb.pts.length - 1 && lb.legs.every(x => x)) for (const x of planBusStops(lb).stops) if (!x.sid) f.push({ type: 'Feature', properties: { auto: true }, geometry: { type: 'Point', coordinates: x.ll } });
   }
-  if (lb && (lb.mode === 'bus' ? lb.pts : lb.stops).length >= 2) {
+  if (lb && lb.mode !== 'ferry' && lb.mode !== 'truck' && (lb.mode === 'bus' ? lb.pts : lb.stops).length >= 2) {
     if (lb.mode === 'bus') lb.legs.forEach((c, i) => c && f.push({ type: 'Feature', properties: { color: lb.color }, geometry: { type: 'LineString', coordinates: c } }));
     else { const tmp = deriveLine({ stops: lb.stops }, trackAdj()); if (tmp) f.push({ type: 'Feature', properties: { color: lb.color }, geometry: { type: 'LineString', coordinates: tmp.coords } }); }
   }
@@ -2204,15 +2385,15 @@ function renderTrains() {
   const f = [];
   for (const L of G.lines) {
     const d = LD.get(L.id); if (!d) continue;
-    if (!isBus(L)) { trainsFromTT(L, d, f); continue; }
-    const hw = currentHeadway(L, G.t); if (hw == null) continue;
-    const n = Math.max(1, Math.round(d.cycle / (hw * 60))), sp = d.cycle / n, col = lineColor(L), bus = isBus(L);
+    if (isRail(L)) { trainsFromTT(L, d, f); continue; }
+    const cg = isCargoL(L), hw = cg ? 20 * 60 / effPerDay(L) : currentHeadway(L, G.t); if (hw == null) continue;
+    const n = Math.max(1, Math.round(d.cycle / (hw * 60))), sp = d.cycle / n, col = lineColor(L), bus = isBus(L) || L.mode === 'truck';
     for (let k = 0; k < n; k++) {
       const tau = (G.t + k * sp) % d.cycle;
       let lo = 0, hi = d.tl.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (d.tl[m].t1 < tau) lo = m + 1; else hi = m; }
       const s = d.tl[lo], u = s.t1 > s.t0 ? (tau - s.t0) / (s.t1 - s.t0) : 0;
       const e = u * u * (3 - 2 * u); // 加減速っぽく見せる
-      f.push({ type: 'Feature', properties: { color: col, bus }, geometry: { type: 'Point', coordinates: pointAt(d, s.d0 + (s.d1 - s.d0) * e) } });
+      f.push({ type: 'Feature', properties: { color: col, bus, exp: L.mode === 'freight' || isFerry(L), ring: cg ? '#5d4037' : '#0d47a1' }, geometry: { type: 'Point', coordinates: pointAt(d, s.d0 + (s.d1 - s.d0) * e) } });
     }
   }
   map.getSource('trains').setData({ type: 'FeatureCollection', features: f }); renderTrains.n = f.length;
@@ -2358,7 +2539,7 @@ function dirFrom(ll, other) {
 }
 // 駅：同じ地名の駅がすでにあるときは、方角（東西南北）や「新」を付けて区別する
 function uniqueName(base, self, ll) {
-  const others = G.stations.filter(s => s !== self && !isBus(s));
+  const others = G.stations.filter(s => s !== self && isRailSt(s));
   const has = n => others.some(s => s.name === n);
   let n = cleanPlaceName((base || '').replace(/駅$/, ''));
   if (!n) { let k = 1; while (has(`新駅${k}`)) k++; return `新駅${k}`; }
@@ -2370,12 +2551,22 @@ function uniqueName(base, self, ll) {
   for (const c of cand) if (!has(c)) return c;
   let k = 2; while (has(`${n}第${k}駅`)) k++; return `${n}第${k}駅`;
 }
+// 港・貨物ターミナル：地名＋「港」など。重なったら「新」「第2」
+function simpleName(base, suffix, self) {
+  const has = n => G.stations.some(s => s !== self && s.name === n);
+  let n = cleanPlaceName((base || '').replace(/(駅|港)$/, ''));
+  if (!n) { let k = 1; while (has(`${suffix}${k}`)) k++; return `${suffix}${k}`; }
+  if (!has(n + suffix)) return n + suffix;
+  if (!has('新' + n + suffix)) return '新' + n + suffix;
+  let k = 2; while (has(`${n}第${k}${suffix}`)) k++; return `${n}第${k}${suffix}`;
+}
+const kindName = s => isPort(s) ? '港' : isDepot(s) ? '貨物ターミナル' : null;
 // バス停：鉄道駅の近く（250m以内）なら「〇〇駅前」、それ以外は地名。重なったら「〇〇東」「〇〇入口」など
 function busStopName(self, base) {
   const ll = [self.lng, self.lat];
   const others = G.stations.filter(s => s !== self && isBus(s));
   const has = n => others.some(s => s.name === n);
-  const near = G.stations.filter(s => !isBus(s)).map(s => [s, hav([s.lng, s.lat], ll)]).filter(x => x[1] < 250).sort((a, b) => a[1] - b[1])[0];
+  const near = G.stations.filter(s => isRailSt(s)).map(s => [s, hav([s.lng, s.lat], ll)]).filter(x => x[1] < 250).sort((a, b) => a[1] - b[1])[0];
   // 候補の地名のうち、まだ使われていないものを優先
   if (!near && Array.isArray(base)) { for (const b of base) { const c = cleanPlaceName(b); if (c && !has(c)) return c; } base = base[0]; }
   let n = near ? near[0].name.replace(/駅$/, '') + '駅前' : cleanPlaceName(base);
@@ -2388,17 +2579,43 @@ function busStopName(self, base) {
 }
 
 // ---------- 操作 ----------
+const kindOk = (s, k) => k === 'cargo' ? isCargoNode(s) : k === 'railcargo' ? isRailSt(s) && !!s.cargo : (s.kind ?? 'rail') === k;
 function stationNear(pt, px = 16, kind, own) {
   let best = null, bd = px;
-  for (const s of G.stations) { if (kind && (isBus(s) ? 'bus' : 'rail') !== kind) continue; if (own && !usableBy(s, ui.me)) continue; const p = map.project([s.lng, s.lat]); const d = Math.hypot(p.x - pt.x, p.y - pt.y); if (d < bd) { bd = d; best = s; } }
+  for (const s of G.stations) { if (kind && !kindOk(s, kind)) continue; if (own && !usableBy(s, ui.me)) continue; const p = map.project([s.lng, s.lat]); const d = Math.hypot(p.x - pt.x, p.y - pt.y); if (d < bd) { bd = d; best = s; } }
   return best;
 }
 function buildStation(e) {
   const ll = [e.lngLat.lng, e.lngLat.lat];
-  if (G.stations.some(s => !isBus(s) && mine(s) && hav([s.lng, s.lat], ll) < 250)) return toast('近くに自社の駅があります（250m以上離してください）');
-  const c = COST[ui.level].st;
+  if (G.stations.some(s => isRailSt(s) && mine(s) && hav([s.lng, s.lat], ll) < 250)) return toast('近くに自社の駅があります（250m以上離してください）');
+  const c = COST[ui.level].st * (ui.single ? SINGLE_RATE : 1);
   if (myCo().money < c) return toast(`資金が足りません（必要：${fmtYen(c)}）`);
-  dispatch({ type: 'station', ll, level: ui.level, name: nearbyName(e.point) });
+  dispatch({ type: 'station', ll, level: ui.level, name: nearbyName(e.point), single: !!ui.single });
+}
+// 港：海・川・湖のそば（400m以内）に置く
+function nearWater(e) {
+  if (!waterLayers.length) return true;
+  const mpp = 156543.03 * Math.cos(e.lngLat.lat * Math.PI / 180) / 2 ** map.getZoom(), r = Math.min(200, 400 / mpp);
+  for (let a = 0; a < 16; a++) for (const f of [0, 0.5, 1]) {
+    const p = [e.point.x + Math.cos(a / 16 * 2 * Math.PI) * r * f, e.point.y + Math.sin(a / 16 * 2 * Math.PI) * r * f];
+    try { if (map.queryRenderedFeatures(p, { layers: waterLayers }).length) return true; } catch (err) { return true; }
+  }
+  return false;
+}
+function buildPort(e) {
+  const ll = [e.lngLat.lng, e.lngLat.lat];
+  const near = G.stations.find(s => isPort(s) && hav([s.lng, s.lat], ll) < 500);
+  if (near) return toast(`すぐ近くに「${near.name}」があります。港は共用なので、そのまま航路に使えます`);
+  if (!nearWater(e)) return toast('港は海・川・湖のそば（400m以内）に置いてください');
+  if (myCo().money < FERRY.port) return toast(`資金が足りません（必要：${fmtYen(FERRY.port)}）`);
+  dispatch({ type: 'port', ll, name: nearbyName(e.point) });
+}
+function buildDepot(e) {
+  const ll = [e.lngLat.lng, e.lngLat.lat];
+  const near = G.stations.find(s => isDepot(s) && hav([s.lng, s.lat], ll) < 1000);
+  if (near) return toast(`近くに「${near.name}」があります（1km以上離してください）`);
+  if (myCo().money < TRUCK.depot) return toast(`資金が足りません（必要：${fmtYen(TRUCK.depot)}）`);
+  dispatch({ type: 'depot', ll, name: nearbyName(e.point) });
 }
 function buildBusStop(e) {
   const ll = [e.lngLat.lng, e.lngLat.lat];
@@ -2452,10 +2669,10 @@ function smoothPath(cs, R) {
 // 曲線半径による速度制限（目安：V = 4√R km/h、最高90km/h）
 const curveSpeed = R => Math.min(RAIL.speed, 4 * Math.sqrt(R) / 3.6);
 const fmtR = R => R === Infinity ? '直線' : `R${Math.round(R / 10) * 10}m`;
-function trackCost(coords, level) {
+function trackCost(coords, level, single = ui.single) {
   const len = polyLen(coords);
   const wet = level === 0 ? waterLength(coords) : 0;
-  return { len, wet, cost: (len - wet) / 1000 * COST[level].km + wet / 1000 * BRIDGE_KM };
+  return { len, wet, cost: ((len - wet) / 1000 * COST[level].km + wet / 1000 * BRIDGE_KM) * (single ? SINGLE_RATE : 1) };
 }
 function onTrackClick(e) {
   const s = stationNear(e.point, 16, 'rail', true);
@@ -2467,20 +2684,60 @@ function onTrackClick(e) {
     const c = trackCost(coords, ui.level);
     if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
     const vmax = curveSpeed(sm.minR);
-    dispatch({ type: 'track', a: a.id, b: s.id, coords, level: ui.level, len: c.len, cost: c.cost, minR: sm.minR === Infinity ? null : Math.round(sm.minR), vmax,
-      msg: `${a.name}〜${s.name}　${COST[ui.level].name} ${fmtKm(c.len)}${c.wet > 20 ? `（うち橋梁 ${fmtKm(c.wet)}）` : ''}${sm.minR < Infinity ? `　最小${fmtR(sm.minR)}・制限${Math.round(vmax * 3.6)}km/h` : ''}　${fmtYen(c.cost)}` });
+    dispatch({ type: 'track', a: a.id, b: s.id, coords, level: ui.level, len: c.len, cost: c.cost, minR: sm.minR === Infinity ? null : Math.round(sm.minR), vmax, single: !!ui.single,
+      msg: `${a.name}〜${s.name}　${COST[ui.level].name}${ui.single ? '・単線' : ''} ${fmtKm(c.len)}${c.wet > 20 ? `（うち橋梁 ${fmtKm(c.wet)}）` : ''}${sm.minR < Infinity ? `　最小${fmtR(sm.minR)}・制限${Math.round(vmax * 3.6)}km/h` : ''}　${fmtYen(c.cost)}` });
     ui.drawing = { from: s.id, pts: [] };
     renderPreview();
   } else { ui.drawing.pts.push([e.lngLat.lng, e.lngLat.lat]); renderPreview(); }
 }
 function newLineBuild(mode) {
   const co = myCo();
+  if (mode === 'ferry' || mode === 'truck') return { mode, pts: [], legs: [], color: co.color };
   return mode === 'bus' ? { mode, pts: [], stops: [], legs: [], auto: true, spacing: 400, color: co.color } : { mode, stops: [], color: co.color };
+}
+const LB_TOOL = { line: 'rail', busline: 'bus', ferryline: 'ferry', truckline: 'truck', freightline: 'freight' };
+// 航路：港をクリックすると寄港地、それ以外の場所をクリックすると経由点（陸を避けて海の上を通す）
+function onFerryClick(e) {
+  const lb = ui.lineBuild, s = stationNear(e.point, 16, 'port');
+  if (!lb.pts.length && !s) return toast('航路は港から始めてください');
+  const last = lb.pts[lb.pts.length - 1];
+  if (s && last?.sid === s.id) return;
+  lb.pts.push(s ? { sid: s.id } : { ll: [e.lngLat.lng, e.lngLat.lat] });
+  renderPreview(); renderNetwork(); renderPanel();
+}
+// 航路の経由点つきの経路を、港ごとの区間に分ける
+function ferryPlan(lb) {
+  const stops = [], legs = []; let cur = null;
+  for (const q of lb.pts) {
+    const p = ptLL(q), c = [p.lng, p.lat];
+    if (cur) cur.push(c);
+    if (q.sid) { if (cur) legs.push(cur); stops.push(q.sid); cur = [c]; }
+  }
+  return { stops, legs, open: lb.pts.length && !lb.pts[lb.pts.length - 1].sid };
+}
+// トラック便：貨物の拠点（ターミナル・港・貨物駅）を順にクリック。道路に沿って走る
+function onTruckClick(e) {
+  const lb = ui.lineBuild, s = stationNear(e.point, 16, 'cargo');
+  if (!s) return toast('貨物ターミナル・港・貨物駅をクリックしてください');
+  const last = lb.pts[lb.pts.length - 1]; if (last && last.sid === s.id) return;
+  const q = { sid: s.id }; lb.pts.push(q);
+  if (lb.pts.length >= 2) {
+    const i = lb.pts.length - 2, a = ptLL(lb.pts[i]), b = ptLL(q); lb.legs[i] = null;
+    askBusRoute(a, b, coords => {
+      if (ui.lineBuild !== lb || lb.pts[i + 1] !== q) return;
+      if (!coords) { toast('道路が見つからない区間を直線で結びました'); coords = straight(a, b); }
+      lb.legs[i] = round6(coords); renderPreview(); renderPanel();
+    });
+  }
+  renderPreview(); renderNetwork(); renderPanel();
 }
 function onLineClick(e) {
   const lb = ui.lineBuild, bus = lb.mode === 'bus';
   if (bus) return onBusLineClick(e);
-  const s = stationNear(e.point, 16, 'rail', true); if (!s) return;
+  if (lb.mode === 'ferry') return onFerryClick(e);
+  if (lb.mode === 'truck') return onTruckClick(e);
+  const s = stationNear(e.point, 16, lb.mode === 'freight' ? 'railcargo' : 'rail', true);
+  if (!s) { if (lb.mode === 'freight') toast('貨物の取り扱いのある駅をクリックしてください（駅のパネルで始められます）'); return; }
   const st = lb.stops;
   if (st.length && st[st.length - 1] === s.id) return;
   if (st.length && !pathBetween(st[st.length - 1], s.id, trackAdj(ui.me))) return toast(`${stById(st[st.length - 1]).name}から${s.name}まで線路がつながっていません`);
@@ -2558,6 +2815,9 @@ function planBusStops(lb) {
   return { path, stops: anchors };
 }
 function confirmLine() {
+  const lb0 = ui.lineBuild;
+  if (lb0?.mode === 'ferry') return confirmFerryLine();
+  if (lb0?.mode === 'truck') return confirmTruckLine();
   const lb = ui.lineBuild; if (!lb || (lb.mode === 'bus' ? lb.pts : lb.stops).length < 2) return toast(lb?.extend ? '延伸先をクリックしてください' : `${lb?.mode === 'bus' ? '始点と終点' : '駅を2つ以上'}を選んでください`);
   if (lb.mode === 'bus') return confirmBusLine();
   if (lb.extend) {
@@ -2566,10 +2826,38 @@ function confirmLine() {
     ui.lineBuild = null; setTool('select'); ui.sel = { type: 'line', id: lb.extend }; renderPanel(); return;
   }
   const tmp = deriveLine({ stops: lb.stops }, trackAdj()); if (!tmp) return toast('線路がつながっていません');
+  if (lb.mode === 'freight') {
+    const need = Math.max(1, Math.ceil(tmp.cycle * 4 / (20 * 3600)));
+    if (myCo().money < need * FRT.vehicle) return toast(`車両購入の資金が足りません（${need}編成：${fmtYen(need * FRT.vehicle)}）`);
+    dispatch({ type: 'line', mode: 'freight', stops: lb.stops.slice(), color: lb.color });
+    ui.lineBuild = null; setTool('select'); return;
+  }
   const need = Math.max(1, Math.ceil(tmp.cycle / 300));
   const vc = (lb.cars || 10) * RAIL.carCost;
   if (myCo().money < need * vc) return toast(`車両購入の資金が足りません（${need}編成：${fmtYen(need * vc)}）`);
   dispatch({ type: 'line', mode: 'rail', stops: lb.stops.slice(), color: lb.color, cars: lb.cars || 10 });
+  ui.lineBuild = null; setTool('select');
+}
+function confirmFerryLine() {
+  const lb = ui.lineBuild, plan = ferryPlan(lb);
+  if (plan.stops.length < 2) return toast('港を2つ以上選んでください');
+  if (plan.open) return toast('航路の終点は港にしてください（最後の経由点のあとに港をクリック）');
+  // 陸の上を長く通っていないか（見えている範囲で判定）
+  for (let i = 0; i < plan.legs.length; i++) {
+    const c = plan.legs[i], len = polyLen(c), w = waterLength(c);
+    if (waterLayers.length && len > 1500 && w < len * 0.5) return toast(`${stById(plan.stops[i]).name}〜${stById(plan.stops[i + 1]).name}が陸の上を通っています。海の上に経由点を置いてください`);
+  }
+  const len = plan.legs.reduce((a, c) => a + polyLen(c), 0), cyc = len / FERRY.speed * 2 + FERRY.turn * 2;
+  const need = Math.max(1, Math.ceil(cyc / 3600));
+  if (myCo().money < need * FERRY.vehicle) return toast(`船の購入資金が足りません（${need}隻：${fmtYen(need * FERRY.vehicle)}）`);
+  dispatch({ type: 'line', mode: 'ferry', color: lb.color, stops: plan.stops, legs: plan.legs.map(round6) });
+  ui.lineBuild = null; setTool('select');
+}
+function confirmTruckLine() {
+  const lb = ui.lineBuild;
+  if (lb.pts.length < 2) return toast('拠点を2つ以上選んでください');
+  if (lb.legs.length < lb.pts.length - 1 || lb.legs.some(x => !x)) return toast('道路の経路を探しています。少し待ってください');
+  dispatch({ type: 'line', mode: 'truck', color: lb.color, stops: lb.pts.map(q => q.sid), legs: lb.legs.slice() });
   ui.lineBuild = null; setTool('select');
 }
 function confirmBusLine() {
@@ -2629,12 +2917,38 @@ function applyAct(a, cid) {
   const own = x => x && (x.owner ?? 1) === cid;
   switch (a.type) {
     case 'station': {
-      const c = COST[a.level].st; if (!pay(c)) return '資金が足りません';
+      const c = COST[a.level].st * (a.single ? SINGLE_RATE : 1); if (!pay(c)) return '資金が足りません';
       const ap = nearAirport(a.ll[0], a.ll[1], 1000);
       const s = newStop('rail', a.ll, cid, a.level, uniqueName(ap ? ap.name : a.name, null, a.ll));
+      if (a.single) s.single = true;
       if (ap) s.autoName = false; // 空港の近くなら「〇〇空港駅」
-      return `${s.name}（${COST[s.level].name}駅）を建設しました　${fmtYen(c)}`;
+      return `${s.name}（${COST[s.level].name}${a.single ? '・単線' : ''}駅）を建設しました　${fmtYen(c)}`;
     }
+    case 'port': {
+      if (!pay(FERRY.port)) return '資金が足りません';
+      const s = newStop('port', a.ll, cid, 0, simpleName(a.name, '港', null));
+      return `${s.name}を建設しました　${fmtYen(FERRY.port)}`;
+    }
+    case 'depot': {
+      if (!pay(TRUCK.depot)) return '資金が足りません';
+      const s = newStop('depot', a.ll, cid, 0, simpleName(a.name, '貨物ターミナル', null));
+      return `${s.name}を設置しました　${fmtYen(TRUCK.depot)}`;
+    }
+    case 'cargo': {
+      const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.cargo) return null;
+      const c = COST[st.level].st * 0.3; if (!pay(c)) return `貨物ホームの工事に${fmtYen(c)}かかります。資金が足りません`;
+      st.cargo = true; return `${st.name}で貨物の取り扱いを始めました（貨物ホーム ${fmtYen(c)}）`;
+    }
+    case 'double': {
+      // 単線の線路・駅を複線（2線）にする：最初に節約した分の工事費がかかる
+      if (a.what === 'track') { const t = tkById(a.id); if (!own(t) || !t.single) return null; const c = trackCost(t.coords, t.level, false).cost * SINGLE_RATE; if (!pay(c)) return `複線化の工事に${fmtYen(c)}かかります。資金が足りません`; t.single = false; return `線路を複線にしました（${fmtYen(c)}）`; }
+      const st = stById(a.id); if (!own(st) || !st.single) return null;
+      const c = COST[st.level].st * SINGLE_RATE; if (!pay(c)) return `駅の2線化の工事に${fmtYen(c)}かかります。資金が足りません`;
+      st.single = false; return `${st.name}を2線の駅（すれ違い・2方向同時発着ができる）にしました（${fmtYen(c)}）`;
+    }
+    case 'perDay': { const L = lnById(a.id); if (!own(L) || !isCargoL(L) || !PER_DAY.includes(a.v)) return null; const old = L.perDay; L.perDay = a.v;
+      const need = vehiclesNeeded(L); if (need > L.fleet) { const cost = (need - L.fleet) * vehCost(L); if (!pay(cost)) { L.perDay = old; return `車両が${need - L.fleet}${spec(L).unit}不足、購入資金が足りません（${fmtYen(cost)}）`; } const m = `車両を${need - L.fleet}${spec(L).unit}購入しました（${fmtYen(cost)}）`; L.fleet = need; return m; }
+      return null; }
     case 'busstop': {
       if (!pay(BUS.stop)) return '資金が足りません';
       const s = newStop('bus', a.ll, cid, 0, null);
@@ -2644,11 +2958,27 @@ function applyAct(a, cid) {
     case 'track': {
       if (!usableBy(stById(a.a), cid) || !usableBy(stById(a.b), cid)) return '乗り入れを許可していない会社の駅には線路をつなげません';
       if (!pay(a.cost)) return '資金が足りません';
-      G.tracks.push({ id: nid(), owner: cid, a: a.a, b: a.b, coords: a.coords, level: a.level, len: a.len, minR: a.minR, vmax: a.vmax });
+      G.tracks.push({ id: nid(), owner: cid, a: a.a, b: a.b, coords: a.coords, level: a.level, len: a.len, minR: a.minR, vmax: a.vmax, ...(a.single ? { single: true } : {}) });
       return a.msg;
     }
     case 'line': {
       let L;
+      const tag0 = cid === 1 ? '' : co.name.slice(0, 1);
+      if (a.mode === 'ferry' || a.mode === 'truck' || a.mode === 'freight') {
+        const okSt = id => { const st = stById(id); return a.mode === 'ferry' ? isPort(st) : a.mode === 'truck' ? isCargoNode(st) : isRailSt(st) && st.cargo && usableBy(st, cid); };
+        if (!a.stops.every(okSt)) return a.mode === 'ferry' ? '航路は港と港を結んでください' : a.mode === 'truck' ? 'トラック便は貨物ターミナル・港・貨物駅を結んでください' : '貨物列車は貨物の取り扱いのある駅（自社か乗り入れできる駅）を結んでください';
+        const k = a.mode === 'ferry' ? 'ferryNo' : a.mode === 'truck' ? 'truckNo' : 'frNo'; co[k] = co[k] || 1;
+        const nm = a.mode === 'ferry' ? '航路' : a.mode === 'truck' ? 'トラック便' : '貨物';
+        L = { id: nid(), owner: cid, mode: a.mode, code: tag0 + (a.mode === 'ferry' ? 'F' : a.mode === 'truck' ? 'T' : 'K') + co[k], name: `${tag0 ? co.name : ''}${nm}${co[k]}${a.mode === 'freight' ? '列車' : '号'}`, color: a.color, stops: a.stops, legs: a.mode === 'freight' ? undefined : a.legs, fleet: 0 };
+        if (a.mode === 'ferry') { L.hp = 60; L.ho = 120; } else L.perDay = 4;
+        const d = deriveLine(L, trackAdj(cid)); if (!d) return '線路がつながっていません（乗り入れできない線路は通れません）';
+        LD.set(L.id, d);
+        const need = vehiclesNeeded(L), cost = need * vehCost(L);
+        if (!pay(cost)) { LD.delete(L.id); return `車両購入の資金が足りません（${need}${spec(L).unit}：${fmtYen(cost)}）`; }
+        L.fleet = need; G.lines.push(L); co[k]++;
+        if (cid === ui.me) ui.sel = { type: 'line', id: L.id };
+        return `${L.name}が開業しました（${L.stops.length}か所、車両${need}${spec(L).unit} ${fmtYen(cost)}）`;
+      }
       if (a.mode === 'bus') {
         const nNew = a.stops.filter(x => !x.sid).length;
         if (co.money < nNew * BUS.stop) return '資金が足りません';
@@ -2673,7 +3003,7 @@ function applyAct(a, cid) {
       const snap = JSON.stringify({ hp: L.hp, ho: L.ho, svc: L.svc || [] });
       if (a.type === 'headway') L[a.key] = a.v;
       else if (a.type === 'svcAdd') {
-        if (isBus(L)) return null;
+        if (!isRail(L)) return null;
         L.svc = L.svc || [];
         const mids = L.stops.slice(1, -1);
         if (a.short) {
@@ -2702,7 +3032,7 @@ function applyAct(a, cid) {
       return a.type === 'svcAdd' ? '種別を追加しました。停車駅と運転間隔を設定してください' : null;
     }
     case 'extend': {
-      const L = lnById(a.id); if (!own(L) || !a.stops?.length) return null;
+      const L = lnById(a.id); if (!own(L) || !a.stops?.length || !(isRail(L) || isBus(L))) return null;
       const snap = JSON.stringify({ stops: L.stops, legs: L.legs, svc: L.svc });
       const restore = () => { const o = JSON.parse(snap); L.stops = o.stops; L.legs = o.legs; L.svc = o.svc; LD.set(L.id, deriveLine(L, trackAdj())); };
       const tail = a.end === 'tail', oldEnd = tail ? L.stops[L.stops.length - 1] : L.stops[0];
@@ -2715,7 +3045,7 @@ function applyAct(a, cid) {
         else { L.stops = ids.slice().reverse().concat(L.stops); L.legs = a.legs.map(c => c.slice().reverse()).reverse().concat(L.legs || []); }
         added = ids.length;
       } else {
-        if (!a.stops.every(id => usableBy(stById(id), cid) && !isBus(stById(id)))) return '乗り入れを許可していない会社の駅には延伸できません';
+        if (!a.stops.every(id => usableBy(stById(id), cid) && isRailSt(stById(id)))) return '乗り入れを許可していない会社の駅には延伸できません';
         if (a.stops.some(id => L.stops.includes(id))) return 'すでに路線に含まれている駅があります';
         L.stops = tail ? L.stops.concat(a.stops) : a.stops.slice().reverse().concat(L.stops);
         // 優等列車はもとの終点にも止まり、新しい終点まで走る
@@ -2736,17 +3066,18 @@ function applyAct(a, cid) {
       return isBus(L) ? `${L.name}を延伸しました（停留所${added}か所${extra}）` : `${L.name}を${stById(newEnd).name}まで延伸しました（${added}駅${extra}）`;
     }
     case 'turnback': {
-      const st = stById(a.id); if (!own(st) || isBus(st) || st.turnback) return null;
+      const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.turnback) return null;
       const c = COST[st.level].st * 0.4; if (!pay(c)) return `折り返し設備の工事に${fmtYen(c)}かかります。資金が足りません`;
       st.turnback = true; return `${st.name}に折り返し設備（引き上げ線・渡り線）を設けました（${fmtYen(c)}）`;
     }
     case 'passing': {
-      const st = stById(a.id); if (!own(st) || isBus(st) || st.passing) return null;
+      const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.passing) return null;
+      if (st.single) return '単線の駅には待避線を設けられません。先に2線の駅にしてください';
       const c = COST[st.level].st * 0.6; if (!pay(c)) return `待避線の工事に${fmtYen(c)}かかります。資金が足りません`;
       st.passing = true; return `${st.name}に待避線を設けました（${fmtYen(c)}）`;
     }
     case 'cars': {
-      const L = lnById(a.id); if (!own(L) || isBus(L) || !CARS.includes(a.cars)) return null;
+      const L = lnById(a.id); if (!own(L) || !isRail(L) || !CARS.includes(a.cars)) return null;
       const old = carsOf(L), add = Math.max(0, a.cars - old) * L.fleet * RAIL.carCost;
       if (!pay(add)) return `車両の増結に${fmtYen(add)}かかります。資金が足りません`;
       L.cars = a.cars;
@@ -2773,13 +3104,14 @@ function applyAct(a, cid) {
     case 'remove': {
       if (a.what === 'station') {
         const st = stById(a.id); if (!own(st)) return '他社の駅・バス停は撤去できません';
-        if (isBus(st) && G.lines.some(L => (L.owner ?? 1) !== cid && L.stops.includes(st.id))) return `「${st.name}」は他社のバスも使っているので撤去できません`;
+        if ((isBus(st) || isPort(st) || isDepot(st)) && G.lines.some(L => (L.owner ?? 1) !== cid && L.stops.includes(st.id))) return `「${st.name}」は他社も使っているので撤去できません`;
         G.tracks = G.tracks.filter(t => t.a !== a.id && t.b !== a.id);
         for (const L of G.lines) {
           if (!L.stops.includes(a.id)) continue;
           L.stops = L.stops.filter((x, i, arr) => x !== a.id && (i === 0 || arr[i - 1] !== x));
           for (const sv of L.svc || []) { sv.stops = sv.stops.filter(x => x !== a.id); if (sv.from === a.id) sv.from = null; if (sv.to === a.id) sv.to = null; }
-          if (isBus(L) && L.stops.length >= 2) rerouteBus(L);
+          if ((isBus(L) || L.mode === 'truck') && L.stops.length >= 2) rerouteBus(L);
+          else if (isFerry(L) && L.stops.length >= 2) L.legs = L.stops.slice(0, -1).map((x, i) => straight(stById(x), stById(L.stops[i + 1])));
         }
         G.stations = G.stations.filter(x => x.id !== a.id);
         return `${st.name}を撤去しました`;
@@ -2809,13 +3141,15 @@ function onClick(e) {
   if (ui.tool === 'station') return buildStation(e);
   if (ui.tool === 'busstop') return buildBusStop(e);
   if (ui.tool === 'track') return onTrackClick(e);
-  if (ui.tool === 'line' || ui.tool === 'busline') return onLineClick(e);
+  if (ui.tool === 'port') return buildPort(e);
+  if (ui.tool === 'depot') return buildDepot(e);
+  if (LB_TOOL[ui.tool]) return onLineClick(e);
   if (ui.tool === 'route') return onRouteClick(e);
   const bb = [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]];
   const s = stationNear(e.point, 12);
   if (s) ui.sel = { type: 'station', id: s.id };
   else {
-    const ln = ui.tool === 'select' ? map.queryRenderedFeatures(bb, { layers: ['ln-line', 'bus-line'] })[0] : null;
+    const ln = ui.tool === 'select' ? map.queryRenderedFeatures(bb, { layers: ['ln-line', 'fl-line', 'bus-line', 'fe-line', 'tr-line'] })[0] : null;
     const tk = map.queryRenderedFeatures(bb, { layers: ['tk-hit'] })[0];
     const zn = !ln && !tk && ui.zones.on && ui.tool === 'select' ? map.queryRenderedFeatures(bb, { layers: ['zone-circle'] })[0] : null;
     if (ln) ui.sel = { type: 'line', id: ln.properties.lid };
@@ -2842,7 +3176,7 @@ function onMove(e) {
     if (f) { const z = ui.zones.data.zones[f.properties.i]; if (z) { hz = f.properties.i; const t = zsum(z); html = `<b>${esc(z.name)}周辺</b><br>移動 ${fmtNum(t)}人/日<br>公共交通 ${Math.round(zpt(z) * 100)}%・人口 約${fmtMan(z.pop)}人`; } }
   }
   if (!html && ui.tool === 'select') {
-    let f = null; try { f = map.queryRenderedFeatures([[e.point.x - 4, e.point.y - 4], [e.point.x + 4, e.point.y + 4]], { layers: ['ln-line', 'bus-line'] })[0]; } catch (err) { }
+    let f = null; try { f = map.queryRenderedFeatures([[e.point.x - 4, e.point.y - 4], [e.point.x + 4, e.point.y + 4]], { layers: ['ln-line', 'fl-line', 'bus-line', 'fe-line', 'tr-line'] })[0]; } catch (err) { }
     if (f) { const L = lnById(f.properties.lid), r = demand?.ln.get(L?.id); if (L) { const ec = lineEcon(L); html = `<b>${esc(L.name)}</b><br>${r ? `輸送 ${fmtNum(r.riders)}人/日` : '計算中'}${ec.coef ? `・営業係数 ${Math.round(ec.coef)}` : ''}`; } }
   }
   if (hz !== (ui.hoverZone ?? -1)) { ui.hoverZone = hz; renderZones(); }
@@ -2851,25 +3185,31 @@ function onMove(e) {
 }
 function setTool(t) {
   ui.tool = t; ui.drawing = null;
-  ui.lineBuild = t === 'line' ? newLineBuild('rail') : t === 'busline' ? newLineBuild('bus') : null;
+  ui.lineBuild = LB_TOOL[t] ? newLineBuild(LB_TOOL[t]) : null;
   if (t !== 'route') ui.route = null;
   if (t !== 'select' && t !== 'remove') ui.sel = null;
   document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   map.getCanvas().style.cursor = (t === 'select') ? '' : 'crosshair';
   renderPreview(); renderNetwork(); renderPanel(); updateHint();
 }
+function setGauge(single) { ui.single = single; document.querySelectorAll('[data-gauge]').forEach(b => b.classList.toggle('on', (b.dataset.gauge === '1') === single)); updateHint(); }
 function setLevel(lv) { ui.level = lv; document.querySelectorAll('[data-level]').forEach(b => b.classList.toggle('on', +b.dataset.level === lv)); updateHint(); }
 function updateHint() {
   const c = COST[ui.level]; let h = '';
   if (ui.tool === 'select') h = '駅・路線・線路・地域の円をクリックすると詳しい情報が出ます。';
-  else if (ui.tool === 'station') h = `地図をクリックして駅を建設します。<br>${c.name}駅：${fmtYen(c.st)}`;
+  else if (ui.tool === 'station') h = `地図をクリックして駅を建設します。<br>${c.name}${ui.single ? '・単線' : ''}駅：${fmtYen(c.st * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線の駅に止まる路線は、列車の本数が半分になります。' : ''}`;
   else if (ui.tool === 'track') {
-    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。<br>${c.name}：1kmあたり${fmtYen(c.km)}`;
-    if (ui.drawing && ui.cursor) { const a = stById(ui.drawing.from); const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, ui.cursor], ui.radius); const len = polyLen(sm.coords); h += `<br><b>${fmtKm(len)}　約${fmtYen(len / 1000 * c.km)}</b>${sm.minR < Infinity ? `<br>最小${fmtR(sm.minR)}・制限${Math.round(curveSpeed(sm.minR) * 3.6)}km/h` : ''}`; }
+    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。<br>${c.name}${ui.single ? '・単線' : ''}：1kmあたり${fmtYen(c.km * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線は建設費が半分ですが、通る路線は列車の本数が半分になります。' : ''}`;
+    if (ui.drawing && ui.cursor) { const a = stById(ui.drawing.from); const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, ui.cursor], ui.radius); const len = polyLen(sm.coords); h += `<br><b>${fmtKm(len)}　約${fmtYen(len / 1000 * c.km * (ui.single ? SINGLE_RATE : 1))}</b>${sm.minR < Infinity ? `<br>最小${fmtR(sm.minR)}・制限${Math.round(curveSpeed(sm.minR) * 3.6)}km/h` : ''}`; }
   }
   else if (ui.tool === 'line') h = '停車する駅を順番にクリックし、右のパネルで「開業する」を押します。';
   else if (ui.tool === 'busstop') h = `道路沿いをクリックしてバス停を置きます。駅の近くなら「〇〇駅前」になります。<br>1か所 ${fmtYen(BUS.stop)}`;
   else if (ui.tool === 'busline') h = '始点と終点をクリックすると、道路に沿って経路を探し、バス停を自動で置きます。既存のバス停をクリックすれば、そこに止まります。';
+  else if (ui.tool === 'port') h = `海・川・湖のそばをクリックして港を建設します。港は共用で、どの会社の船も使えます。<br>1か所 ${fmtYen(FERRY.port)}`;
+  else if (ui.tool === 'ferryline') h = '港を順にクリックします。海の上をクリックすると経由点になります。右のパネルで「開業する」を押します。';
+  else if (ui.tool === 'depot') h = `地図をクリックして貨物ターミナル（トラックの拠点）を置きます。まわり3kmの事業所・住民から荷物が集まります。<br>1か所 ${fmtYen(TRUCK.depot)}`;
+  else if (ui.tool === 'truckline') h = '貨物ターミナル・港・貨物駅を順にクリックすると、道路に沿ってトラック便を走らせます。';
+  else if (ui.tool === 'freightline') h = '貨物の取り扱いのある駅（駅のパネルで「貨物の取り扱いを始める」）を順にクリックします。旅客の路線と同じ線路を走れます。';
   else if (ui.tool === 'route') h = '出発する駅・バス停と、到着する駅・バス停を順にクリックします。';
   else if (ui.tool === 'stlist') h = '右の一覧で、駅ごとの乗客数を比べられます。';
   else if (ui.tool === 'remove') h = '駅・バス停・線路・路線をクリックして選び、右のパネルで撤去します。費用は戻りません。';
@@ -2886,7 +3226,7 @@ function renderPanel() {
   const p = $('#panel');
   if (typingIn(document.activeElement) && p.contains(document.activeElement)) { ui.panelDirty = true; return; }
   ui.panelDirty = false;
-  if ((ui.tool === 'line' || ui.tool === 'busline') && ui.lineBuild) return p.innerHTML = panelLineBuild();
+  if (LB_TOOL[ui.tool] && ui.lineBuild) return p.innerHTML = panelLineBuild();
   if (ui.tool === 'route') return p.innerHTML = panelRoute();
   if (ui.tool === 'stlist') return p.innerHTML = panelStationList();
   const s = ui.sel;
@@ -2904,11 +3244,12 @@ function transfersAt(sid, exceptLine) {
   return G.lines.filter(L => L.id !== exceptLine && L.stops.some(x => near.includes(x)));
 }
 function panelStation(s) {
+  if (isPort(s) || isDepot(s)) return panelHub(s);
   const d = demand?.st.get(s.id), ca = catchmentOf(s), bus = isBus(s);
   const lines = G.lines.filter(L => L.stops.includes(s.id)), tr = transfersAt(s.id).filter(L => !lines.includes(L));
   return `<h2>${esc(s.name)}</h2>
   <div class="row"><input id="stName" value="${esc(s.name)}" maxlength="20" style="flex:1"><button class="btn" data-act="renameSt">名前を変更</button></div>
-  <div class="kv"><div>種類</div><div>${bus ? 'バス停' : COST[s.level].name + '駅'}</div>
+  <div class="kv"><div>種類</div><div>${bus ? 'バス停' : COST[s.level].name + (s.single ? '・単線' : '') + '駅'}${s.cargo ? '（貨物取扱）' : ''}</div>
   <div>乗車人員（平日）</div><div>${d ? fmtNum(d.board) + '人/日' : '―'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の人口</div><div>${ca ? '約' + fmtNum(ca.pop) + '人' : '読込前'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の従業者</div><div>${ca ? '約' + fmtNum(ca.jobs) + '人' : '読込前'}</div></div>
@@ -2920,18 +3261,38 @@ function panelStation(s) {
   ${tr.length ? `<h3>乗り換え（徒歩）</h3><div>${tr.map(badge).join('')}</div>` : ''}
   ${(() => { const a = areaShare(s); return a.m.size > 1 ? `<h3>周辺（800m）の各社の乗車シェア</h3>${shareBar(a.m, a.tot)}` : ''; })()}
   ${!bus ? `<div class="row">折り返し：${s.turnback ? '<b>できる</b>（途中駅止まりの列車が折り返せます）' : (mine(s) ? `設備なし <button class="btn" data-act="turnback">折り返し設備を設ける（${fmtYen(COST[s.level].st * 0.4)}）</button>` : '設備なし')}</div><p class="small">路線の始発・終着駅は設備がなくても折り返せます。</p>` : ''}
-  ${!bus ? `<div class="row">待避線：${s.passing ? '<b>あり</b>（優等列車の通過待ちができます）' : (mine(s) ? `なし <button class="btn" data-act="passing">待避線を設ける（${fmtYen(COST[s.level].st * 0.6)}）</button>` : 'なし')}</div>` : ''}
+  ${!bus ? `<div class="row">待避線：${s.passing ? '<b>あり</b>（優等列車の通過待ちができます）' : (mine(s) && !s.single ? `なし <button class="btn" data-act="passing">待避線を設ける（${fmtYen(COST[s.level].st * 0.6)}）</button>` : 'なし')}</div>` : ''}
+  ${!bus && s.single ? `<div class="row">単線の駅（1線）：止まる路線は列車の本数が半分です。${mine(s) ? `<button class="btn" data-act="doubleSt">2線の駅にする（${fmtYen(COST[s.level].st * SINGLE_RATE)}）</button>` : ''}</div>` : ''}
+  ${!bus ? `<div class="row">貨物：${s.cargo ? `<b>取り扱いあり</b>${fdemand?.st.get(s.id) ? `（${fmtNum(fdemand.st.get(s.id).tons)}トン/日）` : ''}` : (mine(s) ? `なし <button class="btn" data-act="cargoSt">貨物の取り扱いを始める（${fmtYen(COST[s.level].st * 0.3)}）</button>` : 'なし')}</div><p class="small">貨物駅にすると、貨物列車・トラック便が発着できます。まわり3kmの事業所・住民から荷物が集まります。</p>` : ''}
   ${bus ? `<div class="netbox">共用のバス停です。どの会社のバスも止まれます（使用料なし）。${(() => { const cs = [...new Set(G.lines.filter(L => L.stops.includes(s.id)).map(L => L.owner ?? 1))].map(c => coById(c)?.name).filter(Boolean); return cs.length ? '使用中：' + cs.map(esc).join('・') : ''; })()}</div>` : ''}
   ${!mine(s) && !bus ? `<div class="netbox">${accessOf(s.owner ?? 1).allow ? `乗り入れできます。使用料：${bus ? `${fmtNum(accessOf(s.owner ?? 1).stationFee / 10)}円/停車` : `駅 ${fmtNum(accessOf(s.owner ?? 1).stationFee)}円/停車・線路 ${fmtNum(accessOf(s.owner ?? 1).trackFee)}円/編成キロ`}` : 'この会社は乗り入れを認めていません。'}</div>` : ''}
   <p class="small">運営：<i class="linechip" style="background:${coById(s.owner ?? 1)?.color}"></i>${esc(coById(s.owner ?? 1)?.name || '')}</p>
   ${ui.tool === 'remove' && mine(s) ? removeBtn(`この${stopWord(s)}を撤去する`) : ''}`;
 }
+// 港・貨物ターミナル
+function panelHub(s) {
+  const lines = G.lines.filter(L => L.stops.includes(s.id)), port = isPort(s), d = demand?.st.get(s.id), f = fdemand?.st.get(s.id);
+  return `<h2>${esc(s.name)}</h2>
+  <div class="row"><input id="stName" value="${esc(s.name)}" maxlength="20" style="flex:1"><button class="btn" data-act="renameSt">名前を変更</button></div>
+  <div class="kv"><div>種類</div><div>${port ? '港（フェリーターミナル）' : 'トラックの貨物ターミナル'}</div>
+  ${port ? `<div>乗船客（平日）</div><div>${d ? fmtNum(d.board) + '人/日' : '―'}</div>` : ''}
+  <div>貨物の取扱量</div><div>${f ? fmtNum(f.tons) + 'トン/日' : '―'}</div>
+  <div>まわり3kmで出る荷物</div><div>${f ? '約' + fmtNum(f.gen) + 'トン/日' : '計算前'}</div>
+  <div>運営費</div><div>${fmtYen(stDayOf(s))}/日</div></div>
+  <h3>${port ? '航路・便' : '発着する便'}</h3>
+  <div class="list">${lines.map(L => `<div class="item" data-line="${L.id}"><span>${badge(L)} ${esc(L.name)}</span></div>`).join('') || '<span class="small">なし</span>'}</div>
+  <div class="netbox">共用の${port ? '港' : 'ターミナル'}です。どの会社も使えます（使用料なし）。</div>
+  <p class="small">${port ? 'フェリーは旅客を運ぶほか、港と港の間でトラック（貨物）も運びます。港の利用圏は1.2kmです。' : 'トラック便は道路を走り、ターミナル・港・貨物駅を結びます。'}</p>
+  <p class="small">運営：<i class="linechip" style="background:${coById(s.owner ?? 1)?.color}"></i>${esc(coById(s.owner ?? 1)?.name || '')}</p>
+  ${ui.tool === 'remove' && mine(s) ? removeBtn(`この${stopWord(s)}を撤去する`) : ''}`;
+}
 function panelTrack(t) {
   const a = stById(t.a), b = stById(t.b);
-  return `<h2>線路</h2><div class="kv"><div>区間</div><div>${esc(a.name)}〜${esc(b.name)}</div><div>構造</div><div>${COST[t.level].name}</div><div>長さ</div><div>${fmtKm(t.len)}</div><div>最小曲線半径</div><div>${t.minR ? fmtR(t.minR) : '直線'}</div><div>速度制限</div><div>${Math.round((t.vmax || RAIL.speed) * 3.6)}km/h</div><div>保守費</div><div>${fmtYen(t.len / 1000 * COST[t.level].maint)}/日</div></div>
+  return `<h2>線路</h2><div class="kv"><div>区間</div><div>${esc(a.name)}〜${esc(b.name)}</div><div>構造</div><div>${COST[t.level].name}・${t.single ? '単線' : '複線'}</div><div>長さ</div><div>${fmtKm(t.len)}</div><div>最小曲線半径</div><div>${t.minR ? fmtR(t.minR) : '直線'}</div><div>速度制限</div><div>${Math.round((t.vmax || RAIL.speed) * 3.6)}km/h</div><div>保守費</div><div>${fmtYen(trackMaint(t))}/日</div></div>
+  ${t.single ? `<p class="small">単線です。この線路を通る路線は、すれ違いの待ち合わせのため列車の本数が半分になります。</p>${mine(t) ? `<div class="row"><button class="btn" data-act="doubleTk">複線にする（${fmtYen(trackCost(t.coords, t.level, false).cost * SINGLE_RATE)}）</button></div>` : ''}` : ''}
   ${mine(t) ? removeBtn('この線路を撤去する') : `<p class="small">${esc(coById(t.owner ?? 1)?.name || '')}の線路です。${accessOf(t.owner ?? 1).allow ? `乗り入れできます（${fmtNum(accessOf(t.owner ?? 1).trackFee)}円/編成キロ）。` : '乗り入れは認められていません。'}</p>`}`;
 }
-function hwSelect(id, v, attrs = '', allowZero = false) { return `<select id="${id}" ${attrs}>${allowZero ? `<option value="0" ${!v ? 'selected' : ''}>運転なし</option>` : ''}${HEADWAYS.map(h => `<option value="${h}" ${h === v ? 'selected' : ''}>${fmtHw(h)}ごと</option>`).join('')}</select>`; }
+function hwSelect(id, v, attrs = '', allowZero = false, list = HEADWAYS) { return `<select id="${id}" ${attrs}>${allowZero ? `<option value="0" ${!v ? 'selected' : ''}>運転なし</option>` : ''}${list.map(h => `<option value="${h}" ${h === v ? 'selected' : ''}>${fmtHw(h)}ごと</option>`).join('')}</select>`; }
 // 種別（普通・快速・特急など）と停車駅の設定
 function svcPanel(L, tt) {
   const own = mine(L), SV = services(L), d = LD.get(L.id);
@@ -2983,14 +3344,14 @@ function stopBadges(sid, exceptLine) {
   for (const L of G.lines) {
     if (L.id === exceptLine) continue;
     const i = L.stops.indexOf(sid); if (i < 0) continue;
-    if (isBus(L)) { out.push(badge(L)); continue; }
+    if (!isRail(L)) { out.push(badge(L)); continue; }
     for (const sv of services(L)) if (sv.idx.includes(i) && (sv.hp || sv.ho)) out.push(svcBadge(L, sv));
   }
   return out.join('');
 }
 // 路線図（停車駅パターン）：種別ごとに縦の線を並べ、止まる駅に丸、通過する駅は線だけ
 function lineDiagram(L, r) {
-  const n = L.stops.length, SV = (isBus(L) ? services(L).slice(0, 1) : services(L)).filter(sv => sv.hp || sv.ho || sv.key === 'base');
+  const n = L.stops.length, SV = (!isRail(L) ? services(L).slice(0, 1) : services(L)).filter(sv => sv.hp || sv.ho || sv.key === 'base');
   const RH = 40, CW = 18, X0 = 12, W = X0 + SV.length * CW, H = n * RH;
   let svg = '';
   SV.forEach((sv, c) => {
@@ -3015,7 +3376,8 @@ function lineDiagram(L, r) {
   <p class="small">縦の線が種別ごとの運転区間、丸が停車駅です。右の数字は駅の乗車人員（人/日）、バッジはその駅に止まるほかの路線・種別です。◆待避線　↩折り返し設備</p>`;
 }
 function panelLine(L) {
-  const d = LD.get(L.id), r = demand?.ln.get(L.id), sp = spec(L), ec = lineEcon(L), bus = isBus(L);
+  if (isCargoL(L)) return panelCargoLine(L);
+  const d = LD.get(L.id), r = demand?.ln.get(L.id), sp = spec(L), ec = lineEcon(L), bus = !isRail(L), ferry = isFerry(L);
   const need = vehiclesNeeded(L);
   const tt = bus ? null : ensureTT(L);
   const mins = Math.round((tt ? tt.svcLeg[0].oneWay : d.cycle / 2 - sp.turn) / 60);
@@ -3032,6 +3394,8 @@ function panelLine(L) {
   <p class="small">路線の色は会社の色（${esc(coById(L.owner ?? 1)?.name || '')}）で統一しています。路線は記号（${esc(L.code)}）で見分けます。</p>
   <div class="kv"><div>${bus ? '路線長' : '営業キロ'}</div><div>${fmtKm(d.len)}</div><div>所要時間（片道）</div><div>約${mins}分</div>
   <div>輸送人員（平日）</div><div>${r ? fmtNum(r.riders) + '人/日' : '計算中'}</div>
+  ${ferry ? `<div>貨物（トラック）</div><div>${fdemand?.ln.get(L.id) ? fmtNum(fdemand.ln.get(L.id).tons) + 'トン/日' : '―'}</div>` : ''}
+  ${d.single ? '<div>単線</div><div class="neg">あり（本数が半分）</div>' : ''}
   <div>運賃収入（平日）</div><div>${r ? fmtYen(ec.rev) + '/日' : '―'}</div>
   <div>費用（運行・保守・駅）</div><div>${fmtYen(ec.cost)}/日</div>
   ${ec.fee ? `<div>うち乗り入れの使用料</div><div>${fmtYen(ec.fee)}/日</div>` : ''}
@@ -3041,8 +3405,10 @@ function panelLine(L) {
   <div>保有車両</div><div>${L.fleet}${sp.unit}（必要${need}）</div></div>
   <p class="small">営業係数は100円の収入を得るのにかかる費用です。100未満なら黒字です。</p>
   ${bus ? `<h3>運転間隔</h3>
-  <div class="row">朝夕ラッシュ ${hwSelect('hp', L.hp)}</div>
-  <div class="row">日中・夜 ${hwSelect('ho', L.ho)}</div>` : svcPanel(L, tt)}
+  <div class="row">朝夕ラッシュ ${hwSelect('hp', L.hp, mine(L) ? '' : 'disabled', false, ferry ? FERRY_HW : HEADWAYS)}</div>
+  <div class="row">日中・夜 ${hwSelect('ho', L.ho, mine(L) ? '' : 'disabled', false, ferry ? FERRY_HW : HEADWAYS)}</div>
+  ${ferry ? `<p class="small">1隻 旅客${fmtNum(FERRY.cap)}人・トラック${fmtNum(FERRY.cargo)}トン分。運賃は会社の設定（基本${fmtNum(coById(L.owner ?? 1)?.fare.ferryBase ?? 500)}円＋1kmごと${fmtNum(coById(L.owner ?? 1)?.fare.ferryPerKm ?? 25)}円）、貨物は${FRATE.ferry}円/トンキロ。</p>` : ''}` : svcPanel(L, tt)}
+  ${d.single && !bus ? `<p class="small neg">単線の区間（線路または駅）があるため、設定した運転間隔の2倍の間隔で走ります。複線化すると元に戻ります。</p>` : ''}
   <p class="small">ラッシュ：7〜9時・17〜19時。1〜5時は運休。車両が足りないときは自動で購入します（1${sp.unit}${fmtYen(vehCost(L))}）。</p>
   ${bus ? '' : `<h3>編成の両数</h3>
   <div class="row">${mine(L) ? carsSelect('lnCars', carsOf(L)) : carsOf(L) + '両'}<span class="small">定員 ${fmtNum(vehCap(L))}人/編成・運行費 ${fmtNum(kmCostOf(L))}円/編成キロ</span></div>
@@ -3056,26 +3422,76 @@ function panelLine(L) {
   ${r && r.bandCrowd ? `<h3>時間帯ごとの混雑（いちばん混む区間の平均）</h3><div class="bands">${r.bandCrowd.map((c, b) => `<div class="bcol"><div class="bbox"><i style="height:${Math.min(100, c * 100 / 1.5)}%;background:${crowdColor(c * 100)}"></i></div><span>${Math.round(c * 100)}%</span><span>${BANDS[b].replace('時', '')}</span></div>`).join('')}</div>` : ''}
   <h3>区間ごとの混雑率（朝ラッシュ1時間）</h3>
   ${segs || '<span class="small">データなし</span>'}
-  <p class="small">混雑率は定員（${bus ? '1台70人' : `${carsOf(L)}両1編成${fmtNum(vehCap(L))}人`}）に対する割合。100%で座席と吊り革が埋まる程度、150%を超えると乗客が避けるようになります。</p>
-  ${mine(L) ? `<h3>延伸</h3><div class="row"><button class="btn" data-act="extHead">${esc(stById(L.stops[0]).name)}側に延ばす</button><button class="btn" data-act="extTail">${esc(stById(L.stops[L.stops.length - 1]).name)}側に延ばす</button></div>
+  <p class="small">混雑率は定員（${ferry ? `1隻${fmtNum(FERRY.cap)}人` : bus ? '1台70人' : `${carsOf(L)}両1編成${fmtNum(vehCap(L))}人`}）に対する割合。100%で座席と吊り革が埋まる程度、150%を超えると乗客が避けるようになります。</p>
+  ${mine(L) && (isRail(L) || isBus(L)) ? `<h3>延伸</h3><div class="row"><button class="btn" data-act="extHead">${esc(stById(L.stops[0]).name)}側に延ばす</button><button class="btn" data-act="extTail">${esc(stById(L.stops[L.stops.length - 1]).name)}側に延ばす</button></div>
   <p class="small">${bus ? '端のバス停から先の地点をクリックすると、道路に沿って延ばし、バス停も自動で置きます。' : '先に線路を敷いておき、端の駅から先の駅を順にクリックします。優等列車も新しい終点まで走ります。'}</p>` : ''}
   ${mine(L) ? removeBtn('この路線を廃止する') : `<p class="small">${esc(coById(L.owner ?? 1)?.name || '')}の路線です（運転間隔などは変更できません）</p>`}`;
+}
+// 貨物列車・トラック便
+function panelCargoLine(L) {
+  const d = LD.get(L.id), r = fdemand?.ln.get(L.id), sp = spec(L), ec = lineEcon(L), own = mine(L), n = effPerDay(L);
+  let segs = '';
+  if (r) for (let i = 0; i < L.stops.length - 1; i++) {
+    const a = stById(L.stops[i]).name, b = stById(L.stops[i + 1]).name;
+    for (const [dir, lab] of [[0, `${a}→${b}`], [1, `${b}→${a}`]]) {
+      const c = r.load[dir][i] / (r.cap || 1) * 100; if (c < 1) continue;
+      segs += `<div class="seg"><div>${esc(lab)}<div class="bar"><i style="width:${Math.min(100, c)}%;background:${c >= 100 ? '#c0392b' : c >= 70 ? '#e67e22' : '#27ae60'}"></i></div></div><div style="text-align:right">${Math.round(c)}%</div></div>`;
+    }
+  }
+  return `<h2>${badge(L)} ${esc(L.name)}</h2>
+  <div class="row"><input id="lnName" value="${esc(L.name)}" maxlength="20" style="flex:1"><input id="lnCode" value="${esc(L.code)}" maxlength="4" style="width:52px" title="記号"><button class="btn" data-act="renameLn">変更</button></div>
+  <div class="kv"><div>種類</div><div>${MODE_NAME[L.mode]}</div><div>距離</div><div>${fmtKm(d.len)}</div><div>所要時間（片道）</div><div>約${Math.round((d.cycle / 2 - sp.turn) / 60)}分</div>
+  <div>輸送量</div><div>${r ? fmtNum(r.tons) + 'トン/日' : '計算中'}</div>
+  <div>トンキロ</div><div>${r ? fmtNum(r.tkm) : '―'}</div>
+  <div>運賃収入（平日）</div><div>${fmtYen(ec.rev)}/日</div>
+  <div>費用（運行・保守・拠点）</div><div>${fmtYen(ec.cost)}/日</div>
+  ${ec.fee ? `<div>うち乗り入れの使用料</div><div>${fmtYen(ec.fee)}/日</div>` : ''}
+  <div>損益</div><div class="${ec.profit < 0 ? 'neg' : 'pos'}">${fmtYen(ec.profit)}/日</div>
+  <div>営業係数</div><div style="color:${coefColor(ec.coef)};font-weight:700">${ec.coef ? Math.round(ec.coef) : '―'}</div>
+  <div>いちばん積む区間</div><div>${r ? Math.round(r.maxLoad * 100) + '%' : '―'}</div>
+  <div>保有車両</div><div>${L.fleet}${sp.unit}（必要${vehiclesNeeded(L)}）</div></div>
+  <h3>1日の便数（片道）</h3>
+  <div class="row">${own ? `<select id="perDay">${PER_DAY.map(v => `<option value="${v}" ${v === L.perDay ? 'selected' : ''}>${v}便</option>`).join('')}</select>` : L.perDay + '便'}<span class="small">1${sp.unit}${fmtNum(sp.cap)}トン積み・1日に${fmtNum(n * sp.cap)}トンまで運べます</span></div>
+  ${d.single && n < L.perDay ? `<p class="small neg">単線の区間があるため、実際は${n}便です。</p>` : ''}
+  <p class="small">運賃は${FRATE[L.mode]}円/トンキロ。荷主は、自社の便（積み替え・待ち時間を含む）と一般のトラックのどちらが安いかで選びます。長い距離ほど${L.mode === 'freight' ? '貨物列車' : 'トラック便'}が有利です。車両が足りないときは自動で購入します（1${sp.unit}${fmtYen(sp.vehicle)}）。</p>
+  <h3>区間ごとの積載率</h3>${segs || '<span class="small">データなし</span>'}
+  <h3>拠点</h3><div class="list">${L.stops.map(id => { const st = stById(id), f = fdemand?.st.get(id); return `<div class="item" data-st="${id}"><span>${esc(st.name)}</span><span class="small">${f ? fmtNum(f.tons) + 'トン/日' : ''}</span></div>`; }).join('')}</div>
+  ${own ? removeBtn('この便を廃止する') : `<p class="small">${esc(coById(L.owner ?? 1)?.name || '')}の便です</p>`}`;
 }
 function panelLineBuild() {
   const lb = ui.lineBuild, bus = lb.mode === 'bus';
   if (bus) return panelBusBuild(lb);
+  if (lb.mode === 'ferry' || lb.mode === 'truck') return panelPtsBuild(lb);
   let info = '';
   if (lb.stops.length >= 2) {
     const tmp = deriveLine({ stops: lb.stops }, trackAdj());
     if (tmp) { const need = Math.max(1, Math.ceil(tmp.cycle / 300)); info = `<div class="kv"><div>営業キロ</div><div>${fmtKm(tmp.len)}</div><div>必要車両（5分間隔）</div><div>${need}編成</div><div>車両費</div><div>${fmtYen(need * (lb.cars || 10) * RAIL.carCost)}</div></div>`; }
   }
-  info = `<div class="row">両数 ${carsSelect('lbCars', lb.cars || 10)}<span class="small">定員 ${fmtNum((lb.cars || 10) * RAIL.carCap)}人/編成</span></div>` + info;
+  if (lb.mode === 'freight') info = `<p class="small">貨物列車：1編成${fmtNum(FRT.cap)}トン積み・1編成${fmtYen(FRT.vehicle)}。運賃は${FRATE.freight}円/トンキロ。最初は1日4往復で開業します。</p>` + (lb.stops.length >= 2 ? (t => t ? `<div class="kv"><div>営業キロ</div><div>${fmtKm(t.len)}</div></div>` : '<p class="small neg">線路がつながっていません</p>')(deriveLine({ stops: lb.stops }, trackAdj())) : '');
+  else info = `<div class="row">両数 ${carsSelect('lbCars', lb.cars || 10)}<span class="small">定員 ${fmtNum((lb.cars || 10) * RAIL.carCap)}人/編成</span></div>` + info;
   if (lb.extend) info = '';
-  return `<h2>${lb.extend ? `${esc(lnById(lb.extend)?.name || '')}の延伸` : '新しい路線'}</h2>
-  <p class="small">${lb.extend ? '延伸する先の駅を順番にクリックしてください（線路でつながっている必要があります）。' : '停車する駅を順番にクリックしてください。間の駅を飛ばすと、その駅は通過になります。'}</p>
+  return `<h2>${lb.extend ? `${esc(lnById(lb.extend)?.name || '')}の延伸` : lb.mode === 'freight' ? '新しい貨物列車' : '新しい路線'}</h2>
+  <p class="small">${lb.extend ? '延伸する先の駅を順番にクリックしてください（線路でつながっている必要があります）。' : lb.mode === 'freight' ? '貨物の取り扱いのある駅を順番にクリックしてください（線路でつながっている必要があります）。' : '停車する駅を順番にクリックしてください。間の駅を飛ばすと、その駅は通過になります。'}</p>
   <div class="list">${lb.stops.map((id, i) => `<div class="item"><span>${i + 1}. ${esc(stById(id).name)}</span></div>`).join('') || '<span class="small">まだ駅が選ばれていません</span>'}</div>
   ${info}
   <div class="row" style="margin-top:10px"><button class="btn primary" data-act="confirmLine">${lb.extend ? '延伸する' : '開業する'}</button><button class="btn" data-act="undoStop" ${lb.extend && lb.stops.length <= 1 ? 'disabled' : ''}>1つ戻る</button><button class="btn" data-act="cancelLine">やめる</button></div>`;
+}
+// 航路・トラック便をつくるときのパネル
+function panelPtsBuild(lb) {
+  const ferry = lb.mode === 'ferry';
+  let info = '';
+  if (ferry) {
+    const plan = ferryPlan(lb), len = plan.legs.reduce((a, c) => a + polyLen(c), 0);
+    if (plan.stops.length >= 2) { const need = Math.max(1, Math.ceil((len / FERRY.speed * 2 + FERRY.turn * 2) / 3600)); info = `<div class="kv"><div>航路の長さ</div><div>${fmtKm(len)}</div><div>片道の所要</div><div>約${Math.round(len / FERRY.speed / 60)}分</div><div>船（1時間ごと）</div><div>${need}隻・${fmtYen(need * FERRY.vehicle)}</div></div>`; }
+  } else if (lb.pts.length >= 2 && lb.legs.every(x => x)) {
+    const len = lb.legs.reduce((a, c) => a + polyLen(c), 0); info = `<div class="kv"><div>距離</div><div>${fmtKm(len)}</div><div>1台</div><div>${TRUCK.cap}トン積み・${fmtYen(TRUCK.vehicle)}</div></div>`;
+  }
+  const names = lb.pts.map((q, i) => `<div class="item"><span>${i + 1}. ${q.sid ? esc(stById(q.sid).name) : '<span class="small">経由点</span>'}</span>${!ferry && i > 0 && !lb.legs[i - 1] ? '<span class="small">経路を探索中…</span>' : ''}</div>`).join('');
+  return `<h2>${ferry ? '新しい航路（フェリー）' : '新しいトラック便'}</h2>
+  <p class="small">${ferry ? '港を順にクリックします。港と港の間で海の上をクリックすると経由点になり、陸を避けて航路を引けます。フェリーは旅客のほか、トラック（貨物）も運びます。' : '貨物ターミナル・港・貨物駅を順にクリックします。道路に沿って走ります。'}</p>
+  <div class="list">${names || `<span class="small">${ferry ? '出発する港' : '出発する拠点'}をクリックしてください</span>`}</div>
+  ${info}
+  <div class="row" style="margin-top:10px"><button class="btn primary" data-act="confirmLine">開業する</button><button class="btn" data-act="undoStop">1つ戻る</button><button class="btn" data-act="cancelLine">やめる</button></div>`;
 }
 function carsSelect(id, v) { return `<select id="${id}">${CARS.map(c => `<option value="${c}" ${c === v ? 'selected' : ''}>${c}両</option>`).join('')}</select>`; }
 function panelBusBuild(lb) {
@@ -3101,9 +3517,9 @@ function routeHtml(r) {
     if (s.type === 'walk') return `<div class="step walk">徒歩で乗り換え　${fmtMin(s.min)}</div>`;
     const x = lastReq.svc[s.l], L = lnById(x?.lid); if (!L) return '';
     const to = stById(lastReq.stationIds[s.to]), from = stById(lastReq.stationIds[s.from]), term = stById(s.toI > s.fromI ? L.stops[L.stops.length - 1] : L.stops[0]);
-    const c = Math.round(s.maxCrowd * 100), typ = isBus(L) ? '' : `<b style="color:${svcColor(x.type)}">${x.type}</b> `;
+    const c = Math.round(s.maxCrowd * 100), typ = !isRail(L) ? '' : `<b style="color:${svcColor(x.type)}">${x.type}</b> `;
     return `<div class="step" style="border-color:${L.color}"><b>${esc(from.name)}</b>　${badge(L)} ${typ}${esc(L.name)}（${esc(term.name.replace(/駅$/, ''))}方面）<br>
-      <span class="small">待ち約${fmtMin(s.wait)}・乗車${fmtMin(s.min)}・${Math.abs(s.toI - s.fromI)}${isBus(L) ? '停留所' : '駅'}</span>　<span style="color:${crowdColor(c)}">混雑 ${c}%</span><br>→ <b>${esc(to.name)}</b></div>`;
+      <span class="small">待ち約${fmtMin(s.wait)}・乗車${fmtMin(s.min)}・${Math.abs(s.toI - s.fromI)}${isBus(L) ? '停留所' : isFerry(L) ? '港' : '駅'}</span>　<span style="color:${crowdColor(c)}">混雑 ${c}%</span><br>→ <b>${esc(to.name)}</b></div>`;
   }).join('');
   return `<div class="kv"><div>所要時間</div><div>約${Math.round(r.totalMin)}分</div><div>運賃</div><div>${fmtNum(r.fare)}円</div><div>乗り換え</div><div>${r.transfers}回</div><div>いちばん混む区間</div><div style="color:${crowdColor(r.maxCrowd * 100)}">${Math.round(r.maxCrowd * 100)}%</div></div>${steps}`;
 }
@@ -3170,13 +3586,16 @@ function panelOverview() {
   <div>（全社の公共交通利用）</div><div>${demand ? fmtNum(dayRiders(G.day)) + '人' : '―'}</div>
   <div>運賃収入</div><div>${fmtYen(rev)}</div><div>運行費</div><div>${fmtYen(c.op)}</div><div>駅・バス停の運営費</div><div>${fmtYen(c.st)}</div><div>線路の保守費</div><div>${fmtYen(c.maint)}</div>${c.fee ? `<div>乗り入れの使用料（支払い）</div><div>${fmtYen(c.fee)}</div>` : ''}${c.feeIn ? `<div>乗り入れの使用料（受け取り）</div><div class="pos">+${fmtYen(c.feeIn)}</div>` : ''}
   <div>損益</div><div class="${net < 0 ? 'neg' : 'pos'}">${fmtYen(net)}</div>
-  <div>沿線の公共交通分担率</div><div>${demand ? share.toFixed(1) + '%' : '―'}</div></div>
+  <div>沿線の公共交通分担率</div><div>${demand ? share.toFixed(1) + '%' : '―'}</div>
+  ${fdemand ? `<div>貨物（全社）</div><div>${fmtNum(fdemand.tons)}トン/日</div>` : ''}</div>
   <p class="small">1日が終わると、その日の収支の${ECON}日分が資金に計上されます。土休日は通勤・通学が減り、買い物・レジャー・観光が増えます。</p>
   ${demand && demand.ptTrips > 0 ? `<h3>乗客の利用目的（平日）</h3>${purposeBlock(demand.tripsP)}` : ''}
-  <h3>鉄道路線（${G.lines.filter(L => mine(L) && !isBus(L)).length}）</h3>
-  <div class="list">${G.lines.filter(L => mine(L) && !isBus(L)).map(lineItem).join('') || '<span class="small">まだありません。駅を建てて線路でつなぎ、「路線を作成」で開業しましょう。</span>'}</div>
+  <h3>鉄道路線（${G.lines.filter(L => mine(L) && isRail(L)).length}）</h3>
+  <div class="list">${G.lines.filter(L => mine(L) && isRail(L)).map(lineItem).join('') || '<span class="small">まだありません。駅を建てて線路でつなぎ、「路線を作成」で開業しましょう。</span>'}</div>
   <h3>バス路線（${G.lines.filter(L => mine(L) && isBus(L)).length}）</h3>
   <div class="list">${G.lines.filter(L => mine(L) && isBus(L)).map(lineItem).join('') || '<span class="small">まだありません。「バス路線を作成」で始点と終点をクリックすると開業できます。</span>'}</div>
+  ${G.lines.some(L => mine(L) && isFerry(L)) ? `<h3>航路（${G.lines.filter(L => mine(L) && isFerry(L)).length}）</h3><div class="list">${G.lines.filter(L => mine(L) && isFerry(L)).map(lineItem).join('')}</div>` : ''}
+  ${G.lines.some(L => mine(L) && isCargoL(L)) ? `<h3>貨物（${G.lines.filter(L => mine(L) && isCargoL(L)).length}）</h3><div class="list">${G.lines.filter(L => mine(L) && isCargoL(L)).map(L => { const r = fdemand?.ln.get(L.id), ec = lineEcon(L); return `<div class="item" data-line="${L.id}"><span>${badge(L)} ${esc(L.name)}</span><span class="small">${r ? fmtNum(r.tons) + 'トン/日' : ''}${ec.coef ? `　<b style="color:${coefColor(ec.coef)}">係数${Math.round(ec.coef)}</b>` : ''}</span></div>`; }).join('')}</div>` : ''}
   ${rank ? `<h3>混雑区間ワースト5（朝ラッシュ）</h3><div class="list">${rank}</div>` : ''}
   ${G.companies.length > 1 || true ? `<h3>他社の乗り入れ</h3>
   <div class="row"><label><input type="checkbox" id="accAllow" ${accessOf(ui.me).allow ? 'checked' : ''}> 自社の駅・線路への乗り入れを認める</label></div>
@@ -3192,6 +3611,7 @@ function panelOverview() {
     <div class="row">初乗り <input type="number" id="busBase" value="${co.fare.busBase}" min="0" step="10" style="width:64px">円（<input type="number" id="busFree" value="${co.fare.busFreeKm}" min="0" step="0.5" style="width:50px">kmまで）</div>
     <div class="row">以降1kmごと <input type="number" id="busPer" value="${co.fare.busPerKm}" min="0" step="1" style="width:64px">円</div>
   </div>
+  <div class="row">フェリー 基本 <input type="number" id="ferryBase" value="${co.fare.ferryBase}" min="0" step="10" style="width:64px">円＋1kmごと <input type="number" id="ferryPer" value="${co.fare.ferryPerKm}" min="0" step="1" style="width:56px">円</div>
   <div class="row"><button class="btn" data-act="fare">運賃を適用</button></div>
   <p class="small">${co.fare.busMode === 'dist' ? `いまのバス運賃の例：2km ${fmtNum(busFareOf(2, co.fare))}円、5km ${fmtNum(busFareOf(5, co.fare))}円、10km ${fmtNum(busFareOf(10, co.fare))}円` : '均一制は、どこまで乗っても同じ運賃です（都市部の路線バスに多い方式）。'}</p>
   <h3>表示</h3>
@@ -3239,9 +3659,9 @@ $('#panel').addEventListener('click', e => {
   else if (act === 'renameLn') dispatch({ type: 'rename', what: 'line', id: ui.sel.id, name: $('#lnName').value.trim(), code: $('#lnCode').value.trim() });
   else if (act === 'coColor') dispatch({ type: 'coColor', color: $('#coColor').value });
   else if (act === 'confirmLine') confirmLine();
-  else if (act === 'undoStop') { const lb = ui.lineBuild; if (lb.extend && (lb.mode === 'bus' ? lb.pts : lb.stops).length <= 1) return; if (lb.mode === 'bus') { lb.pts.pop(); lb.legs.length = Math.max(0, lb.pts.length - 1); } else lb.stops.pop(); renderPreview(); renderNetwork(); renderPanel(); }
+  else if (act === 'undoStop') { const lb = ui.lineBuild, pb = lb.pts != null; if (lb.extend && (pb ? lb.pts : lb.stops).length <= 1) return; if (pb) { lb.pts.pop(); lb.legs.length = Math.max(0, lb.pts.length - 1); } else lb.stops.pop(); renderPreview(); renderNetwork(); renderPanel(); }
   else if (act === 'cancelLine') setTool('select');
-  else if (act === 'fare') { const v = id => Math.max(0, +$(id).value || 0); dispatch({ type: 'fare', fare: { base: v('#fareBase'), perKm: v('#farePer'), bus: v('#fareBus'), busMode: $('#busFareMode').value, busBase: v('#busBase'), busFreeKm: v('#busFree'), busPerKm: v('#busPer') } }); }
+  else if (act === 'fare') { const v = id => Math.max(0, +$(id).value || 0); dispatch({ type: 'fare', fare: { base: v('#fareBase'), perKm: v('#farePer'), bus: v('#fareBus'), busMode: $('#busFareMode').value, busBase: v('#busBase'), busFreeKm: v('#busFree'), busPerKm: v('#busPer'), ferryBase: v('#ferryBase'), ferryPerKm: v('#ferryPer') } }); }
   else if (act === 'save') save();
   else if (act === 'censusExport') CENSUS.exportJson();
   else if (act === 'matchStart') dispatch({ type: 'match', days: +$('#matchDays').value, by: $('#matchBy').value });
@@ -3254,6 +3674,9 @@ $('#panel').addEventListener('click', e => {
   else if (act === 'extHead' || act === 'extTail') startExtend(ui.sel.id, act === 'extTail' ? 'tail' : 'head');
   else if (act === 'svcDel') dispatch({ type: 'svcDel', id: ui.sel.id, sid: e.target.closest('[data-sid]').dataset.sid });
   else if (act === 'passing') dispatch({ type: 'passing', id: ui.sel.id });
+  else if (act === 'cargoSt') dispatch({ type: 'cargo', id: ui.sel.id });
+  else if (act === 'doubleSt') dispatch({ type: 'double', what: 'station', id: ui.sel.id });
+  else if (act === 'doubleTk') dispatch({ type: 'double', what: 'track', id: ui.sel.id });
   else if (act === 'diagram') openDiagram(ui.sel.id);
   else if (act === 'censusClear') CENSUS.clear();
   else if (act === 'hostNow') NET.host();
@@ -3266,6 +3689,7 @@ $('#panel').addEventListener('click', e => {
   else if (act === 'rtReset') { ui.route = null; renderNetwork(); renderPanel(); renderPreview(); }
 });
 $('#panel').addEventListener('change', e => {
+  if (e.target.id === 'perDay') dispatch({ type: 'perDay', id: ui.sel.id, v: +e.target.value });
   if (e.target.id === 'lnCars') dispatch({ type: 'cars', id: ui.sel.id, cars: +e.target.value });
   if (e.target.id === 'lbCars') { ui.lineBuild.cars = +e.target.value; renderPanel(); }
   if (e.target.id === 'busFareMode') { $('#busFlat').style.display = e.target.value === 'flat' ? '' : 'none'; $('#busDist').style.display = e.target.value === 'dist' ? '' : 'none'; }
@@ -3345,7 +3769,7 @@ document.addEventListener('click', e => { if (e.target.closest('[data-dia-close]
 function competitors(L) {
   const me = L.owner ?? 1, out = [];
   for (const M of G.lines) {
-    if ((M.owner ?? 1) === me || isBus(M) !== isBus(L)) continue;
+    if ((M.owner ?? 1) === me || (M.mode || 'rail') !== (L.mode || 'rail')) continue;
     const mst = M.stops.map(stById);
     const covered = L.stops.filter(id => { const s = stById(id); return mst.some(x => x && hav([x.lng, x.lat], [s.lng, s.lat]) <= 800); });
     if (covered.length >= 2) out.push({ M, covered, ratio: covered.length / L.stops.length });
@@ -3405,7 +3829,7 @@ const MATCH_BY = { money: '資金', riders: '1日の輸送人員', value: '企�
 function coAssets(cid) {
   let v = 0;
   for (const t of G.tracks) if ((t.owner ?? 1) === cid) v += t.len / 1000 * COST[t.level].km * 0.6;
-  for (const s of G.stations) if ((s.owner ?? 1) === cid) v += (isBus(s) ? BUS.stop : COST[s.level].st) * 0.6;
+  for (const s of G.stations) if ((s.owner ?? 1) === cid) v += (isBus(s) ? BUS.stop : isPort(s) ? FERRY.port : isDepot(s) ? TRUCK.depot : COST[s.level].st * (s.single ? SINGLE_RATE : 1)) * 0.6;
   for (const L of G.lines) if ((L.owner ?? 1) === cid) v += L.fleet * vehCost(L) * 0.5;
   return v;
 }
@@ -3489,13 +3913,13 @@ function startGame(g, me = 1) {
     if (away > 60) ui.idlePending = away * G.lastSpeed * 60; // 進めるゲーム内の秒数
   }
   $('#start').style.display = 'none';
-  ui.sel = null; ui.drawing = null; ui.lineBuild = null; ui.route = null; demand = null;
+  ui.sel = null; ui.drawing = null; ui.lineBuild = null; ui.route = null; demand = null; fdemand = null;
   if (ui.zones.on && worker) worker.postMessage({ type: 'zonesOff' });
   ui.zones.on = false; ui.zones.data = null;
   const view = G.view || { center: REGIONS[G.region] || REGIONS['首都圏（東京）'], zoom: 12 };
   if (!map) initMap(view);
   else { if (mapReady) { applyModeLayers(); rebuildLines(); renderNetwork(); renderZones(); requestDemand(); } map.jumpTo({ center: view.center, zoom: view.zoom }); }
-  setTool('select'); setLevel(0); if (NET.role !== 'client') setSpeed(1); renderPanel(); updateTop();
+  setTool('select'); setLevel(0); setGauge(false); if (NET.role !== 'client') setSpeed(1); renderPanel(); updateTop();
 }
 document.querySelectorAll('.mode').forEach(b => b.addEventListener('click', () => { ui.mode = b.dataset.mode; document.querySelectorAll('.mode').forEach(x => x.classList.toggle('sel', x === b)); }));
 $('#newGame').addEventListener('click', () => { newGame(ui.mode, $('#companyInput').value.trim(), $('#regionSel').value, START_MONEY[$('#moneySel').value]); startGame(G); save(true); });
@@ -3512,6 +3936,7 @@ $('#loadFile').addEventListener('change', async e => {
 document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => G && setTool(b.dataset.tool)));
 document.querySelector('[data-zones]').addEventListener('click', () => G && showZones(!ui.zones.on));
 document.querySelectorAll('[data-level]').forEach(b => b.addEventListener('click', () => setLevel(+b.dataset.level)));
+document.querySelectorAll('[data-gauge]').forEach(b => b.addEventListener('click', () => setGauge(b.dataset.gauge === '1')));
 document.querySelectorAll('[data-speed]').forEach(b => b.addEventListener('click', () => setSpeed(+b.dataset.speed)));
 $('#radius').addEventListener('change', e => { ui.radius = e.target.value === 'auto' ? 'auto' : +e.target.value; renderPreview(); updateHint(); });
 $('#colorMode').addEventListener('change', e => { ui.colorMode = e.target.value; renderNetwork(); });
