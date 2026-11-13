@@ -2592,7 +2592,8 @@ function renderPlatforms(mark) {
     }
     done.add(s.id);
   }
-  map.getSource('platforms').setData({ type: 'FeatureCollection', features: feats });
+  // ホームの四角は表示しない（駅は丸のまま）。乗り換え通路だけ描く
+  map.getSource('platforms').setData({ type: 'FeatureCollection', features: [] }); done.clear();
   // 乗り換え通路：歩いて乗り換えられる（300m以内）駅・港どうし
   const xs = G.stations.filter(s => isRailSt(s) || isPort(s)), xf = [];
   for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) {
@@ -2600,7 +2601,8 @@ function renderPlatforms(mark) {
     const dd = hav([a.lng, a.lat], [b.lng, b.lat]); if (dd > 300 || dd < 1) continue;
     xf.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
   }
-  map.getSource('xfers').setData({ type: 'FeatureCollection', features: xf });
+  // 乗り換えの判定は需要計算の中だけで使い、地図には線を描かない
+  map.getSource('xfers').setData({ type: 'FeatureCollection', features: [] });
   return done;
 }
 function renderPreview() {
