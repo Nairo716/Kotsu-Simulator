@@ -50,8 +50,8 @@ input,select{font:inherit;color:inherit;background:var(--panel);border:1px solid
 #tools .btn{text-align:left;width:100%}
 #tools .key{float:right;color:var(--sub);font-size:11px}
 #tools .btn.on .key{color:inherit}
-.levels{display:flex;flex-direction:row;gap:3px}
-.levels .btn{flex:1;text-align:center!important;padding:4px 0!important}
+.levels{display:flex;flex-direction:row;flex-wrap:wrap;gap:3px}
+.levels .btn{flex:1 0 30%;text-align:center!important;padding:4px 0!important;white-space:nowrap}
 .levels .btn{font-size:12px;padding:4px 8px}
 .toolhint{font-size:12px;color:var(--sub);line-height:1.5}
 
@@ -1281,7 +1281,10 @@ function processRails(x, y, L) {
     if (F.type !== 2) continue;
     const pr = props(T, F); if (pr.class !== 'rail' && pr.class !== 'transit') continue;
     if (pr.service && /siding|yard|crossover/.test(pr.service)) continue;
-    for (const line of clipLine(rings(F.geom), T.extent)) {
+    for (const line0 of clipLine(rings(F.geom), T.extent)) {
+      // 長い直線は約50mごとに点を足す（途中をクリックした経由点から線路を見つけられるように）
+      const line = [line0[0]];
+      for (let i = 1; i < line0.length; i++) { const a = line0[i - 1], b = line0[i], n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) * sc / 100)); for (let k = 1; k <= n; k++) line.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]); }
       let prev = -1;
       for (const q of line) {
         const id = roadNode(Math.round(x * 4096 + q[0] * sc), Math.round(y * 4096 + q[1] * sc), RLW);
@@ -1292,17 +1295,18 @@ function processRails(x, y, L) {
   }
 }
 // 2つの駅の間を、実在の線路に沿って結ぶ（間のタイルも読み込む）
-async function railRoute(p0, p1) {
+async function railRoute(p0, p1, viaA = false, viaB = false) {
   const dk = distKm({ lat: p0[1], lon: p0[0] }, { lat: p1[1], lon: p1[0] }), n = Math.max(1, Math.ceil(dk / 1.5)), pts = [];
   for (let i = 0; i <= n; i++) pts.push({ lng: p0[0] + (p1[0] - p0[0]) * i / n, lat: p0[1] + (p1[1] - p0[1]) * i / n });
   await ensureTilesAround(pts, Math.min(4000, 1200 + dk * 120), 60 + n * 12, null);
   const gx1 = lonToG(p1[0]), gy1 = latToG(p1[1]);
-  const A = nearRoads(lonToG(p0[0]), latToG(p0[1]), 400, RLW), B = nearRoads(gx1, gy1, 400, RLW);
+  // 経由点はその点に近い線路だけ（200m以内）、駅は400m以内の線路から
+  const A = nearRoads(lonToG(p0[0]), latToG(p0[1]), viaA ? 200 : 400, RLW), B = nearRoads(gx1, gy1, viaB ? 200 : 400, RLW);
   if (!A.length || !B.length) return null;
   const path = roadAstar(A, B, gx1, gy1, RLW, 400000); if (!path) return null;
-  const coords = [p0];
+  const coords = viaA ? [] : [p0];
   for (const id of path) coords.push([gToLon(RLW.x[id]), gToLat(RLW.y[id])]);
-  coords.push(p1);
+  if (!viaB) coords.push(p1);
   return coords;
 }
 // 近くの道路（線分）の候補をいくつか探し、それぞれの上に頂点を足す。
@@ -1581,7 +1585,10 @@ onmessage = async (ev) => {
     postMessage({ type: 'density', key: m.key, dens: sum / Math.PI });
   } else if (m.type === 'name') {
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], 1500, 12, null);
-    postMessage({ type: 'name', id: m.id, name: nearestPlaceName(m.lat, m.lng), names: nearestPlaceNames(m.lat, m.lng) });
+    // いちばん近い実在の駅（400m以内）
+    let real = null, rd = 400; const pt = { lat: m.lat, lon: m.lng };
+    for (const r of realSt.values()) { if (!r.name || Math.abs(r.lat - m.lat) > 0.01) continue; const d = distKm(pt, r) * 1000; if (d < rd) { rd = d; real = { name: r.name, d: Math.round(d) }; } }
+    postMessage({ type: 'name', id: m.id, name: nearestPlaceName(m.lat, m.lng), names: nearestPlaceNames(m.lat, m.lng), real });
   } else if (m.type === 'area') {
     const ver = ++areaVer; zoneGran = m.gran; if (m.real != null) REAL_ON = !!m.real;
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], m.radius, m.maxTiles, ver);
@@ -1603,7 +1610,14 @@ onmessage = async (ev) => {
     postMessage({ type: 'busroute', key: m.key, coords });
   } else if (m.type === 'railroute') {
     let coords = null;
-    try { coords = await railRoute(m.p0, m.p1); } catch (e) { coords = null; }
+    // 経由点（クリックした点）があれば、そこを通る線路を順にたどる（並んでいる別の路線に乗り移らないように）
+    try {
+      const pts = [m.p0, ...(m.via || []), m.p1]; coords = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const c = await railRoute(pts[i], pts[i + 1], i > 0, i < pts.length - 2); if (!c) { coords = null; break; }
+        for (const q of c) { const l = coords[coords.length - 1]; if (!l || Math.abs(l[0] - q[0]) > 1e-7 || Math.abs(l[1] - q[1]) > 1e-7) coords.push(q); }
+      }
+    } catch (e) { coords = null; }
     postMessage({ type: 'railroute', key: m.key, coords });
   } else if (m.type === 'route') {
     let fast = null, avoid = null; const t0 = performance.now();
@@ -2379,7 +2393,19 @@ function initWorker(tileUrl) {
     else if (m.type === 'error') { setStatus(m.msg); requestDemand.busy = false; requestDemand.key = null; }
     else if (m.type === 'name') {
       const s = stById(m.id);
-      if (s && s.autoName && m.name && NET.role !== 'client') { const nm = isBus(s) ? busStopName(s, m.names || m.name) : kindName(s) ? simpleName(m.name, kindName(s), s) : uniqueName(m.name, s, [s.lng, s.lat]); if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); } }
+      if (s && s.autoName && (m.name || m.real) && NET.role !== 'client') {
+        // 実在の駅の近くなら、地名よりその駅名を優先する（駅は300m以内、バス停は200m以内なら「〇〇駅前」）
+        const rn = m.real ? cleanPlaceName(m.real.name.replace(/駅$/, '')) : '';
+        let nm;
+        if (rn && isRailSt(s) && m.real.d <= 300) {
+          // 同じ実在の駅のそばにある自社・他社の駅（在来線と新幹線など）は同じ駅名でよい
+          const twin = G.stations.some(x => x !== s && isRailSt(x) && x.name === rn + '駅' && hav([x.lng, x.lat], [s.lng, s.lat]) <= 400);
+          nm = twin ? rn + '駅' : uniqueName(rn, s, [s.lng, s.lat]);
+        } else if (rn && isBus(s) && m.real.d <= 200) nm = busStopName(s, null, rn + '駅前');
+        else if (!m.name) return;
+        else nm = isBus(s) ? busStopName(s, m.names || m.name) : kindName(s) ? simpleName(rn && m.real.d <= 300 && isPort(s) ? rn : m.name, kindName(s), s) : uniqueName(m.name, s, [s.lng, s.lat]);
+        if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); }
+      }
     }
     else if (m.type === 'censusOk') { setStatus(`統計データ ${fmtNum(m.n)}メッシュを使用中`); requestDemand(); }
     else if (m.type === 'busroute') { const cb = pending.get(m.key); pending.delete(m.key); if (cb) cb(m.coords); }
@@ -2561,8 +2587,14 @@ function japanizeLabels() {
     if (tf && JSON.stringify(tf).includes('name')) map.setLayoutProperty(l.id, 'text-field', ['coalesce', ['get', 'name:ja'], ['get', 'name']]);
   }
 }
+// 実在の鉄道の線路はどちらのモードでも表示する（線路を引くときの目安）。実在の駅のマークは現実モードだけ
 function applyModeLayers() {
-  for (const l of map.getStyle().layers) if (isRailLayer(l)) map.setLayoutProperty(l.id, 'visibility', G.mode === 'real' ? 'visible' : 'none');
+  for (const l of map.getStyle().layers) {
+    if (!isRailLayer(l)) continue;
+    const isLine = l.type === 'line' && (l['source-layer'] === 'transportation');
+    map.setLayoutProperty(l.id, 'visibility', isLine || G.mode === 'real' ? 'visible' : 'none');
+    if (isLine) { try { map.setPaintProperty(l.id, 'line-color', '#8f959c'); map.setPaintProperty(l.id, 'line-opacity', 0.9); } catch (e) { } }
+  }
 }
 let waterLayers = [];
 const W = (z0, v0, z1, v1, z2, v2) => z2 ? ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1, z2, v2] : ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1];
@@ -2955,10 +2987,11 @@ function simpleName(base, suffix, self) {
 }
 const kindName = s => isPort(s) ? '港' : isDepot(s) ? '貨物ターミナル' : null;
 // バス停：鉄道駅の近く（250m以内）なら「〇〇駅前」、それ以外は地名。重なったら「〇〇東」「〇〇入口」など
-function busStopName(self, base) {
+function busStopName(self, base, forced) {
   const ll = [self.lng, self.lat];
   const others = G.stations.filter(s => s !== self && isBus(s));
   const has = n => others.some(s => s.name === n);
+  if (forced) { if (!has(forced)) return forced; const twin = others.find(s => s.name === forced); for (const c of [forced + dirFrom(ll, twin), forced + '入口', '新' + forced]) if (!has(c)) return c; }
   const near = G.stations.filter(s => isRailSt(s)).map(s => [s, hav([s.lng, s.lat], ll)]).filter(x => x[1] < 250).sort((a, b) => a[1] - b[1])[0];
   // 候補の地名のうち、まだ使われていないものを優先
   if (!near && Array.isArray(base)) { for (const b of base) { const c = cleanPlaceName(b); if (c && !has(c)) return c; } base = base[0]; }
@@ -3109,28 +3142,41 @@ function polyMinR(coords) {
   }
   return minR === Infinity ? Infinity : Math.max(160, minR);
 }
-function snapTrack(a, s) {
+// 線の形を保ったまま点を減らす（ずれ tol m 以内、ダグラス・ポーカー法）
+function simplifyLine(cs, tol) {
+  if (cs.length < 3) return cs;
+  const kx = 111320 * Math.cos(cs[0][1] * Math.PI / 180), ky = 110540, keep = new Uint8Array(cs.length); keep[0] = keep[cs.length - 1] = 1;
+  const st = [[0, cs.length - 1]];
+  while (st.length) {
+    const [i, j] = st.pop(); let bi = -1, bd = tol;
+    const ax = cs[i][0] * kx, ay = cs[i][1] * ky, bx = cs[j][0] * kx, by = cs[j][1] * ky, L = Math.hypot(bx - ax, by - ay) || 1;
+    for (let k = i + 1; k < j; k++) { const d = Math.abs((bx - ax) * (ay - cs[k][1] * ky) - (ax - cs[k][0] * kx) * (by - ay)) / L; if (d > bd) { bd = d; bi = k; } }
+    if (bi >= 0) { keep[bi] = 1; st.push([i, bi], [bi, j]); }
+  }
+  return cs.filter((_, k) => keep[k]);
+}
+function snapTrack(a, s, via = []) {
   if ((ui.level === 3) !== (a.level === 3) || (ui.level === 3) !== (s.level === 3)) return toast('高速鉄道（新幹線）の線路は、高速鉄道の駅どうしを結んでください');
   setStatus('実在の線路をたどっています…');
   const key = Math.random().toString(36).slice(2), level = ui.level, single = !!ui.single, quad = !!ui.quad;
   pending.set(key, coords => {
     setStatus('');
     if (!coords) return toast('近くに実在の線路が見つかりませんでした。チェックを外して手で引いてください');
-    coords = round6(coords);
+    coords = round6(simplifyLine(coords, 2));
     const minR = polyMinR(coords), c = trackCost(coords, level, single, trackLf(a, s), quad);
     if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
     const vmax = level === 2 ? Math.min(TRAM_SPEED, curveSpeed(minR)) : level === 3 ? hsrSpeed(minR) : curveSpeed(minR);
     dispatch({ type: 'track', a: a.id, b: s.id, coords, level, len: c.len, cost: c.cost, lf: c.lf, minR: minR === Infinity ? null : Math.round(minR), vmax, single, quad,
       msg: `${a.name}〜${s.name}　実在の線路に沿って ${COST[level].name}${single ? '・単線' : quad ? '・複々線' : ''} ${fmtKm(c.len)}${minR < Infinity ? `　最小${fmtR(minR)}・制限${Math.round(vmax * 3.6)}km/h` : ''}　${fmtYen(c.cost)}` });
   });
-  worker.postMessage({ type: 'railroute', key, p0: [a.lng, a.lat], p1: [s.lng, s.lat] });
+  worker.postMessage({ type: 'railroute', key, p0: [a.lng, a.lat], p1: [s.lng, s.lat], via: via.slice() });
   ui.drawing = { from: s.id, pts: [] }; renderPreview();
 }
 function onTrackClick(e) {
   const s = stationNear(e.point, 16, 'rail', true);
   if (!ui.drawing) { if (s) { ui.drawing = { from: s.id, pts: [] }; renderPreview(); updateHint(); } else toast('線路は駅から引き始めてください'); return; }
   if (s && s.id === ui.drawing.from) return;
-  if (s && ui.snapReal) return snapTrack(stById(ui.drawing.from), s);
+  if (s && ui.snapReal) return snapTrack(stById(ui.drawing.from), s, ui.drawing.pts);
   if (s) {
     const a = stById(ui.drawing.from);
     // 新幹線の線路は新幹線の駅どうし、在来線の線路は在来線の駅どうしだけ
@@ -3693,7 +3739,7 @@ function updateHint() {
   if (ui.tool === 'select') h = '駅・路線・線路・地域の円をクリックすると詳しい情報が出ます。';
   else if (ui.tool === 'station') h = `地図をクリックして駅を建設します。郊外ほど安く、都心の最大半額です。${ui.level === 2 ? '<br>路面電車の停留場：止まる路線は3両編成まで。' : ''}${ui.level === 3 ? '<br>高速鉄道（新幹線）の駅：高速鉄道の線路だけがつながります。在来線の駅を300m以内に置くと歩いて乗り換えられます。' : ''}<br>${c.name}${ui.single ? '・単線' : ''}駅：${fmtYen(c.st * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線の駅に止まる路線は、列車の本数が半分になります。' : ''}`;
   else if (ui.tool === 'track') {
-    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。郊外ほど建設費が安くなります（両端の駅の地価で決まります）。${ui.level === 2 ? '<br>路面電車の軌道：最高40km/h、走る路線は3両編成まで。' : ''}${ui.level === 3 ? '<br>高速鉄道（新幹線）の線路：高速鉄道の駅どうしを結びます。最高300km/h（カーブはR4000mで約280km/h）。大きなカーブで引きましょう。' : ''}<br>${c.name}${ui.single ? '・単線' : ui.quad ? '・複々線' : ''}：1kmあたり${fmtYen(c.km * (ui.single ? SINGLE_RATE : ui.quad ? QUAD_RATE : 1))}${ui.single ? '<br>単線は建設費が半分ですが、通る路線は列車の本数が半分になります。' : ''}${ui.quad ? '<br>複々線は建設費が1.8倍。普通と快速・急行などが別の線路を走るので、待避線がなくても追い越せ、列車を多く走らせられます。' : ''}`;
+    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。郊外ほど建設費が安くなります（両端の駅の地価で決まります）。${ui.level === 2 ? '<br>路面電車の軌道：最高40km/h、走る路線は3両編成まで。' : ''}${ui.snapReal ? '<br><b>実在の線路に沿わせる：</b>駅→駅とクリックすると、灰色で表示している実在の線路をたどります。路線が並んでいる所では、通りたい線路の上を途中でクリックすると、その線路を通ります。' : ''}${ui.level === 3 ? '<br>高速鉄道（新幹線）の線路：高速鉄道の駅どうしを結びます。最高300km/h（カーブはR4000mで約280km/h）。大きなカーブで引きましょう。' : ''}<br>${c.name}${ui.single ? '・単線' : ui.quad ? '・複々線' : ''}：1kmあたり${fmtYen(c.km * (ui.single ? SINGLE_RATE : ui.quad ? QUAD_RATE : 1))}${ui.single ? '<br>単線は建設費が半分ですが、通る路線は列車の本数が半分になります。' : ''}${ui.quad ? '<br>複々線は建設費が1.8倍。普通と快速・急行などが別の線路を走るので、待避線がなくても追い越せ、列車を多く走らせられます。' : ''}`;
     if (ui.drawing && ui.cursor) { const a = stById(ui.drawing.from); const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, ui.cursor], ui.radius); const len = polyLen(sm.coords); h += `<br><b>${fmtKm(len)}　約${fmtYen(len / 1000 * c.km * (ui.single ? SINGLE_RATE : ui.quad ? QUAD_RATE : 1) * (a.lf ?? 1))}〜</b>${sm.minR < Infinity ? `<br>最小${fmtR(sm.minR)}・制限${Math.round(curveSpeed(sm.minR) * 3.6)}km/h` : ''}`; }
   }
   else if (ui.tool === 'line') h = '停車する駅を順番にクリックし、右のパネルで「開業する」を押します。';
