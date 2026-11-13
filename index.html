@@ -2453,14 +2453,14 @@ function applyModeLayers() {
   for (const l of map.getStyle().layers) if (isRailLayer(l)) map.setLayoutProperty(l.id, 'visibility', G.mode === 'real' ? 'visible' : 'none');
 }
 let waterLayers = [];
-const W = (z0, v0, z1, v1) => ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1];
+const W = (z0, v0, z1, v1, z2, v2) => z2 ? ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1, z2, v2] : ['interpolate', ['linear'], ['zoom'], z0, v0, z1, v1];
 // 単線の線路は細く描く
-const WS = (z0, v0, z1, v1) => ['interpolate', ['linear'], ['zoom'], z0, ['case', ['get', 'sg'], v0 * 0.5, ['get', 'qd'], v0 * 1.7, v0], z1, ['case', ['get', 'sg'], v1 * 0.5, ['get', 'qd'], v1 * 1.7, v1]];
+const WS = (z0, v0, z1, v1) => { const c = v => ['case', ['get', 'sg'], v * 0.5, ['get', 'qd'], v * 1.7, v]; return ['interpolate', ['linear'], ['zoom'], z0, c(v0), z1, c(v1), 18, c(v1 * 2.6)]; };
 async function onMapLoad() {
   japanizeLabels();
   waterLayers = map.getStyle().layers.filter(l => l['source-layer'] === 'water' && l.type === 'fill').map(l => l.id);
   const empty = { type: 'FeatureCollection', features: [] };
-  for (const s of ['airports', 'zones', 'zoneflows', 'mesh', 'tracks', 'lines', 'buslines', 'otherlines', 'route', 'stations', 'trains', 'preview']) map.addSource(s, { type: 'geojson', data: empty });
+  for (const s of ['airports', 'zones', 'zoneflows', 'mesh', 'tracks', 'lines', 'buslines', 'otherlines', 'route', 'stations', 'platforms', 'xfers', 'trains', 'preview']) map.addSource(s, { type: 'geojson', data: empty });
   const firstSymbol = map.getStyle().layers.find(l => l.type === 'symbol')?.id;
   const add = l => map.addLayer(l);
   map.addLayer({ id: 'mesh', type: 'fill', source: 'mesh', layout: { visibility: 'none' }, paint: { 'fill-color': '#fdae6b', 'fill-opacity': 0.5 } }, firstSymbol);
@@ -2482,9 +2482,9 @@ async function onMapLoad() {
   add({ id: 'ot-sel', type: 'line', source: 'otherlines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 6, 15, 12) } });
   add({ id: 'fe-line', type: 'line', source: 'otherlines', filter: ['==', ['get', 'm'], 'ferry'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 4.5), 'line-dasharray': [3, 2], 'line-opacity': 0.9 } });
   add({ id: 'tr-line', type: 'line', source: 'otherlines', filter: ['==', ['get', 'm'], 'truck'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 1.5, 15, 3), 'line-dasharray': [0.6, 1.4], 'line-offset': 3 } });
-  add({ id: 'ln-sel', type: 'line', source: 'lines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 7, 15, 14), 'line-offset': ['get', 'off'] } });
-  add({ id: 'ln-line', type: 'line', source: 'lines', filter: ['!', ['get', 'fr']], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 5), 'line-offset': ['get', 'off'] } });
-  add({ id: 'fl-line', type: 'line', source: 'lines', filter: ['get', 'fr'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2, 15, 4), 'line-offset': ['get', 'off'], 'line-dasharray': [2, 1] } });
+  add({ id: 'ln-sel', type: 'line', source: 'lines', filter: ['==', ['get', 'lid'], -1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffd60a', 'line-width': W(10, 7, 15, 14, 18, 26), 'line-offset': ['interpolate', ['linear'], ['zoom'], 10, ['get', 'off'], 15, ['*', ['get', 'off'], 1.2], 18, ['*', ['get', 'off'], 3]] } });
+  add({ id: 'ln-line', type: 'line', source: 'lines', filter: ['!', ['get', 'fr']], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2.5, 15, 5, 18, 14), 'line-offset': ['interpolate', ['linear'], ['zoom'], 10, ['get', 'off'], 15, ['*', ['get', 'off'], 1.2], 18, ['*', ['get', 'off'], 3]] } });
+  add({ id: 'fl-line', type: 'line', source: 'lines', filter: ['get', 'fr'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 2, 15, 4, 18, 11), 'line-offset': ['interpolate', ['linear'], ['zoom'], 10, ['get', 'off'], 15, ['*', ['get', 'off'], 1.2], 18, ['*', ['get', 'off'], 3]], 'line-dasharray': [2, 1] } });
   add({ id: 'rt-line', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': W(10, 6, 15, 12), 'line-opacity': 0.85 } });
   add({ id: 'pv-line', type: 'line', source: 'preview', filter: ['==', ['geometry-type'], 'LineString'], paint: { 'line-color': ['coalesce', ['get', 'color'], '#0b6e4f'], 'line-width': 4, 'line-dasharray': [2, 1.2] } });
   add({ id: 'pv-pt', type: 'circle', source: 'preview', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': ['case', ['has', 'auto'], 4, 5], 'circle-color': ['case', ['has', 'auto'], '#fff', '#0b6e4f'], 'circle-stroke-color': ['case', ['has', 'auto'], '#1565c0', '#fff'], 'circle-stroke-width': 2 } });
@@ -2492,7 +2492,13 @@ async function onMapLoad() {
   add({ id: 'ap-circle', type: 'circle', source: 'airports', paint: { 'circle-radius': W(8, 4, 14, 10), 'circle-color': '#37474f', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
   add({ id: 'ap-label', type: 'symbol', source: 'airports', layout: { 'text-field': ['get', 'label'], 'text-font': ['Noto Sans Bold'], 'text-size': 12, 'text-offset': [0, 1.3], 'text-anchor': 'top', 'text-optional': true }, paint: { 'text-color': '#37474f', 'text-halo-color': '#fff', 'text-halo-width': 1.6 } });
   map.getSource('airports').setData({ type: 'FeatureCollection', features: AIRPORTS.map((a, i) => ({ type: 'Feature', properties: { i, label: a.name }, geometry: { type: 'Point', coordinates: [a.lng, a.lat] } })) });
+  // 近くから見たとき（ズーム14.5以上）：駅はホームの形（両数に合わせた長さ）、乗り換えできる駅どうしは通路で結ぶ
+  map.addLayer({ id: 'xf-out', type: 'line', source: 'xfers', minzoom: 14, layout: { 'line-cap': 'round' }, paint: { 'line-color': '#1d232b', 'line-width': ['interpolate', ['exponential', 2], ['zoom'], 14, 7, 18, 70], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0, 14.6, 1] } }, 'trains');
+  map.addLayer({ id: 'xf-in', type: 'line', source: 'xfers', minzoom: 14, layout: { 'line-cap': 'round' }, paint: { 'line-color': '#fff', 'line-width': ['interpolate', ['exponential', 2], ['zoom'], 14, 4, 18, 62], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0, 14.6, 1] } }, 'trains');
+  map.addLayer({ id: 'pl-fill', type: 'fill', source: 'platforms', minzoom: 14, paint: { 'fill-color': '#fff', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0, 14.6, 1] } }, 'trains');
+  map.addLayer({ id: 'pl-line', type: 'line', source: 'platforms', minzoom: 14, layout: { 'line-join': 'round' }, paint: { 'line-color': ['case', ['get', 'sel'], '#ff3b30', '#1d232b'], 'line-width': ['interpolate', ['linear'], ['zoom'], 14, 1.5, 17, 3], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0, 14.6, 1] } }, 'trains');
   add({ id: 'st-circle', type: 'circle', source: 'stations', paint: {
+    'circle-opacity': ['interpolate', ['linear'], ['zoom'], 14, 1, 14.6, ['case', ['get', 'plat'], 0, 1]], 'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'], 14, 1, 14.6, ['case', ['get', 'plat'], 0, 1]],
     'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['get', 'bus'], 2, 3.5], 15, ['case', ['get', 'bus'], 5, 8]], 'circle-color': ['match', ['get', 'k'], 'port', '#d6ecff', 'depot', '#f3e2cf', '#fff'],
     'circle-stroke-color': ['case', ['get', 'sel'], '#ff3b30', ['get', 'bus'], '#1565c0', ['==', ['get', 'k'], 'port'], '#0d47a1', ['==', ['get', 'k'], 'depot'], '#795548', ['get', 'cg'], '#795548', '#1d232b'], 'circle-stroke-width': ['case', ['get', 'sel'], 3.5, ['get', 'cg'], 3, 2] } });
   add({ id: 'st-label', type: 'symbol', source: 'stations', filter: ['!', ['get', 'bus']], layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Bold'], 'text-size': W(10, 10, 15, 14), 'text-offset': [0, 1.2], 'text-anchor': 'top', 'text-optional': true }, paint: { 'text-color': '#1d232b', 'text-halo-color': '#fff', 'text-halo-width': 1.6 } });
@@ -2546,8 +2552,56 @@ function renderNetwork() {
   const selL = ui.sel?.type === 'line' ? ui.sel.id : -1;
   map.setFilter('ln-sel', ['==', ['get', 'lid'], selL]); map.setFilter('bus-sel', ['==', ['get', 'lid'], selL]); map.setFilter('ot-sel', ['==', ['get', 'lid'], selL]);
   const mark = new Set(ui.lineBuild?.stops || []); if (ui.route) { if (ui.route.from) mark.add(ui.route.from); if (ui.route.to) mark.add(ui.route.to); }
-  map.getSource('stations').setData({ type: 'FeatureCollection', features: G.stations.map(s => ({ type: 'Feature', properties: { id: s.id, name: s.name, bus: isBus(s), k: s.kind || 'rail', cg: !!s.cargo, sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Point', coordinates: [s.lng, s.lat] } })) });
+  const platSet = renderPlatforms(mark);
+  map.getSource('stations').setData({ type: 'FeatureCollection', features: G.stations.map(s => ({ type: 'Feature', properties: { id: s.id, name: s.name, bus: isBus(s), plat: platSet.has(s.id), k: s.kind || 'rail', cg: !!s.cargo, sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Point', coordinates: [s.lng, s.lat] } })) });
   $('#legend').style.display = ui.colorMode === 'profit' ? 'block' : 'none';
+}
+// 駅のホーム：線路の向きに合わせた長方形。長さは止まる列車のいちばん長い編成（1両20m）、幅は止まる路線の数で広げる
+function renderPlatforms(mark) {
+  const feats = [], done = new Set();
+  const use = new Map(); // 駅ID → [{ang, cars, lid}]
+  for (const L of G.lines) {
+    if (!onTrack(L)) continue; const d = LD.get(L.id); if (!d) continue;
+    L.stops.forEach((id, i) => {
+      const at = d.stopDist[i], a = pointAt(d, Math.max(0, at - 40)), b = pointAt(d, Math.min(d.len, at + 40));
+      const ang = Math.atan2((b[1] - a[1]) * 110540, (b[0] - a[0]) * 111320 * Math.cos(b[1] * Math.PI / 180));
+      if (!use.has(id)) use.set(id, []); use.get(id).push({ ang, cars: L.mode === 'freight' ? 12 : carsOf(L), lid: L.id });
+    });
+  }
+  for (const s of G.stations) {
+    if (!isRailSt(s)) continue;
+    let list = use.get(s.id);
+    if (!list) { // 路線のない駅：つながっている線路の向き
+      const t = G.tracks.find(t => t.a === s.id || t.b === s.id), c = t && (t.a === s.id ? t.coords.slice(0, 2) : t.coords.slice(-2).reverse());
+      const ang = c ? Math.atan2((c[1][1] - c[0][1]) * 110540, (c[1][0] - c[0][0]) * 111320 * Math.cos(s.lat * Math.PI / 180)) : 0;
+      list = [{ ang, cars: 6, lid: 0 }];
+    }
+    // 向きの近い路線（25°以内）はひとつのホームにまとめる
+    const groups = [];
+    for (const u of list) {
+      const g = groups.find(g => { let da = Math.abs(((u.ang - g.ang) % Math.PI + Math.PI) % Math.PI); da = Math.min(da, Math.PI - da); return da < 0.44; });
+      if (g) { g.cars = Math.max(g.cars, u.cars); g.lines.add(u.lid); } else groups.push({ ang: u.ang, cars: u.cars, lines: new Set([u.lid]) });
+    }
+    const kx = 111320 * Math.cos(s.lat * Math.PI / 180), ky = 110540;
+    for (const g of groups) {
+      const len = Math.max(30, g.cars * 20 + 10) * (s.level === 2 ? 0.8 : 1), wid = 14 + 9 * Math.max(0, g.lines.size - 1) + (s.passing ? 8 : 0);
+      const ux = Math.cos(g.ang), uy = Math.sin(g.ang), vx = -uy, vy = ux;
+      const P = (a, b) => [s.lng + (ux * a + vx * b) / kx, s.lat + (uy * a + vy * b) / ky];
+      const ring = [P(-len / 2, -wid / 2), P(len / 2, -wid / 2), P(len / 2, wid / 2), P(-len / 2, wid / 2)]; ring.push(ring[0]);
+      feats.push({ type: 'Feature', properties: { id: s.id, sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Polygon', coordinates: [ring] } });
+    }
+    done.add(s.id);
+  }
+  map.getSource('platforms').setData({ type: 'FeatureCollection', features: feats });
+  // 乗り換え通路：歩いて乗り換えられる（300m以内）駅・港どうし
+  const xs = G.stations.filter(s => isRailSt(s) || isPort(s)), xf = [];
+  for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) {
+    const a = xs[i], b = xs[j]; if (Math.abs(a.lat - b.lat) > 0.003) continue;
+    const dd = hav([a.lng, a.lat], [b.lng, b.lat]); if (dd > 300 || dd < 1) continue;
+    xf.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
+  }
+  map.getSource('xfers').setData({ type: 'FeatureCollection', features: xf });
+  return done;
 }
 function renderPreview() {
   if (!mapReady) return;
@@ -2810,7 +2864,7 @@ function stationNear(pt, px = 16, kind, own) {
 }
 function buildStation(e) {
   const ll = [e.lngLat.lng, e.lngLat.lat];
-  if (G.stations.some(s => isRailSt(s) && mine(s) && hav([s.lng, s.lat], ll) < 250)) return toast('近くに自社の駅があります（250m以上離してください）');
+  if (G.stations.some(s => isRailSt(s) && hav([s.lng, s.lat], ll) < 1)) return toast('同じ場所に駅があります（1m以上離してください）');
   const name = nearbyName(e.point), level = ui.level, single = !!ui.single;
   if (!worker) return;
   setStatus('土地を調べています…');
