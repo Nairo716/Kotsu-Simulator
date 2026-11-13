@@ -228,7 +228,7 @@ td:first-child,th:first-child{text-align:left}
     <p>実際の地図の上に駅と線路をつくり、路線を走らせて乗客を運びましょう。乗客の数は、地図データの建物から推定した人口と働く場所をもとに計算されます。</p>
     <div class="modes">
       <button class="mode sel" data-mode="blank"><b>白紙モード</b><span>鉄道がない首都圏から始めます。自分だけの鉄道網をゼロから作れます。</span></button>
-      <button class="mode" data-mode="real"><b>現実モード</b><span>実在の鉄道を地図に表示します。<br>※試作版では表示のみで、乗客の奪い合いは今後追加予定です。</span></button>
+      <button class="mode" data-mode="real"><b>現実モード</b><span>実在の鉄道を地図に表示します。<br>JR・私鉄・地下鉄などの既存の鉄道と乗客を奪い合います。</span></button>
     </div>
     <div class="row">会社名 <input id="companyInput" value="首都圏新交通" maxlength="20">　地域 <select id="regionSel"></select></div>
     <div class="row">初期資金 <select id="moneySel"></select></div>
@@ -384,11 +384,24 @@ function censusCellsForTile(x, y) {
 }
 // 観光・レジャーの目的地になる施設（POI）
 const TOUR = { attraction: 400, museum: 300, zoo: 800, theme_park: 1500, castle: 400, monument: 100, aquarium: 600, art_gallery: 200, stadium: 800, theatre: 200, cinema: 150, viewpoint: 50, place_of_worship: 60 };
+// 既存の鉄道の駅（現実モードの競合）。同じ名前で300m以内の点は1つの駅にまとめる
+const realSt = new Map(); let realVer = 0, REAL_ON = false;
+function addRealStation(lat, lon, name, sub) {
+  const key = (name || '') + '@' + Math.round(lat * 300) + '_' + Math.round(lon * 300);
+  for (const [k, r] of realSt) if (r.name === name && name && Math.abs(r.lat - lat) < 0.003 && Math.abs(r.lon - lon) < 0.004) return;
+  realSt.set(key, { lat, lon, name: name || '駅', sub }); realVer++; cellsDirty = true;
+}
 function processPOI(x, y, L) {
   const T = L.poi; if (!T) return;
   for (const F of T.features) {
     if (F.type !== 1) continue;
-    const pr = props(T, F), w = TOUR[pr.class] || TOUR[pr.subclass];
+    const pr = props(T, F);
+    if (pr.class === 'railway' && /^(station|halt|subway|tram_stop|light_rail)$/.test(pr.subclass || 'station')) {
+      const q = rings(F.geom)[0]?.[0]; if (!q || q[0] < 0 || q[0] >= T.extent || q[1] < 0 || q[1] >= T.extent) continue;
+      addRealStation(tile2lat(y + q[1] / T.extent), tile2lon(x + q[0] / T.extent), pr['name:ja'] || pr.name, pr.subclass);
+      continue;
+    }
+    const w = TOUR[pr.class] || TOUR[pr.subclass];
     const hotel = pr.class === 'lodging' ? (pr.subclass === 'hostel' || pr.subclass === 'guest_house' ? 0.4 : pr.subclass === 'camp_site' ? 0 : 1) : 0;
     if (!w && !hotel) continue;
     for (const r of rings(F.geom)) for (const q of r) {
@@ -644,6 +657,25 @@ function ensureDenoms() {
   }
   denomVer = cellsVer;
 }
+// 既存の鉄道の駅まで歩く時間（分）。1.2km以内になければ Infinity
+let realAccVer = -1;
+function ensureRealAccess() {
+  const v = cellsVer * 100000 + realVer; if (realAccVer === v) return; realAccVer = v;
+  const grid = new Map(), gk = (a, b) => a + ':' + b;
+  for (const r of realSt.values()) { const k = gk(Math.floor(r.lat / 0.01), Math.floor(r.lon / 0.012)); let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(r); }
+  for (const c of cells.values()) {
+    let best = Infinity; const gi = Math.floor(c.lat / 0.01), gj = Math.floor(c.lon / 0.012);
+    for (let i = gi - 1; i <= gi + 1; i++) for (let j = gj - 1; j <= gj + 1; j++) for (const r of grid.get(gk(i, j)) || []) { const d = Math.max(150, distKm(c, r) * 1000); if (d <= 1200 && d < best) best = d; }
+    c.rw = best === Infinity ? Infinity : best * P.walkDetour / P.walkSpeed;
+  }
+}
+// 既存の鉄道で行く場合の負担（分）：所要（表定約32km/h）＋待ち＋乗換（6km以上は1回）＋運賃
+const realFare = km => Math.round((km <= 3 ? 150 : 150 + (Math.ceil(km) - 3) * 17) / 10) * 10;
+function realCost(dk, rwO, rwD, pf) {
+  if (!REAL_ON || !(rwO < Infinity) || !(rwD < Infinity) || dk < 1) return Infinity;
+  const km = dk * 1.3, xfer = dk > 6 ? 1 : 0;
+  return (rwO + rwD) * pf.walkMul + km / 32 * 60 + 4 + P.board + xfer * (P.board + 4 + pf.xfer) + realFare(km) / pf.vot;
+}
 // 1組の（出発メッシュo, 到着メッシュd）について、目的ごとの片道の人数を fl に入れる。どれかあれば true
 function flowsFor(o, d, dk, fl, min) {
   let any = false;
@@ -656,14 +688,14 @@ function flowsFor(o, d, dk, fl, min) {
 }
 // 目的に合った交通手段の選び方（計算は必要なときだけ）
 // 地域表示用：需要計算で求めた「その組の公共交通の割合」から、交通手段の分担を作る
-const ZMC = { p: [0, 0, 0, 0, 0], pt: 0 };
-function zoneMC(p, oG, dG, dk) {
+const ZMC = { p: [0, 0, 0, 0, 0, 0], pt: 0 };
+function zoneMC(p, oG, dG, dk, rwO = Infinity, rwD = Infinity) {
   const k = PK[p], pf = PROF[PROF_K[k]], C = lastCtx;
   const CG = C.groups ? C.groups.length : 0;
   const pt = C.PTZ && oG >= 0 && dG >= 0 && oG !== dG ? C.PTZ[(oG * CG + dG) * 4 + k] : 0, rail = pt > 0 && C.RZ && (C.RZ[oG * CG + dG] >> k) & 1;
-  shares(dk, k === 0 ? 0 : 1, pf, Infinity, 0, ZMC);
+  shares(dk, k === 0 ? 0 : 1, pf, Infinity, 0, ZMC, realCost(dk, rwO, rwD, pf));
   const q = ZMC.p, rest = 1 - pt;
-  for (let m = 2; m < 5; m++) q[m] *= rest;
+  for (let m = 2; m < 6; m++) q[m] *= rest;
   q[0] = rail ? pt : 0; q[1] = rail ? 0 : pt; ZMC.pt = pt;
   return ZMC;
 }
@@ -753,15 +785,16 @@ function stationCosts(W, S, pf, out) {
   }
 }
 // 公共交通・徒歩・自転車・車の分担（ロジット）。p: [鉄道, バス, 徒歩, 自転車, 車]
-function shares(dk, pass, pf, best, rail, out) {
+function shares(dk, pass, pf, best, rail, out, rc = Infinity) {
   const walk = dk * 1.25 / 4.5 * 60 * pf.walkMul;
   const bike = (dk * 1.25 / 12 * 60 + 8 + Math.max(0, dk - 4) * 5) * pf.bikeMul;
   const car = dk * 1.3 / 20 * 60 + 15 + (dk * 1.3 * pf.carKm + (pf.carFix ?? (pass ? 600 : 1000))) / pf.vot;
   const ew = Math.exp(-P.theta * walk), eb = Math.exp(-P.theta * bike), ec = Math.exp(-P.theta * car);
   const er = best < Infinity ? Math.exp(-P.theta * (best - (rail ? P.railBonus : 0))) : 0;
-  const sum = er + ew + eb + ec, p = out.p;
-  p[0] = rail ? er / sum : 0; p[1] = rail ? 0 : er / sum; p[2] = ew / sum; p[3] = eb / sum; p[4] = ec / sum;
-  out.pt = er / sum; return out;
+  const ex = rc < Infinity ? Math.exp(-P.theta * (rc - P.railBonus)) : 0; // 既存の鉄道
+  const sum = er + ew + eb + ec + ex, p = out.p;
+  p[0] = rail ? er / sum : 0; p[1] = rail ? 0 : er / sum; p[2] = ew / sum; p[3] = eb / sum; p[4] = ec / sum; p[5] = ex / sum;
+  out.pt = er / sum; out.real = ex / sum; return out;
 }
 const PROF_K = ['resident', 'resident', 'visitor', 'airport'];
 // 出発地・到着地のまとまり。多すぎるときは近くのメッシュをまとめる
@@ -796,6 +829,8 @@ function mergeCells(es) {
     for (let p = 0; p < NP; p++) { g.A[p] += c.A[p]; inv[p] += gw / c.den[p]; }
   }
   g.lat /= w; g.lon /= w; g.den = inv.map(x => ww / x);
+  // 既存の鉄道の駅まで：使えるメンバーがいれば重みつき平均（使えないメンバーは20分）
+  if (es.some(e => e.c.rw < Infinity)) { let a = 0, b = 0; for (const e of es) { const cw = 1 + e.c.pop + e.c.jobs; a += cw * Math.min(20, e.c.rw); b += cw; } g.rw = a / b; } else g.rw = Infinity;
   // 使える駅と歩く時間：メンバーの人数で重みをつけた平均（その駅を使えないメンバーは12分歩くものとする）
   const am = new Map(); let tw = 0;
   for (const e of es) { const cw = 1 + e.c.pop + e.c.jobs; tw += cw; for (const [s, wt] of e.acc) am.set(s, (am.get(s) || 0) + cw * (wt - 12)); }
@@ -807,6 +842,7 @@ async function computeDemand(m, ver) {
   const st = m.stations, S = st.length, lines = m.lines, fare = m.fares;
   NC = Math.max(1, fare.length);
   if ((m.dens ?? 1) !== REG_DENS) { REG_DENS = m.dens ?? 1; denomVer = -1; }
+  REAL_ON = !!m.real; ensureRealAccess();
   const emptyLine = () => ({ riders: 0, revenue: 0, load: [[], []], cap: 1, maxCrowd: 0, bandCrowd: [0, 0, 0, 0, 0] });
   const res = { stations: st.map(() => ({ board: 0, byP: new Array(NP).fill(0), byB: new Array(NB).fill(0) })), lines: lines.map(emptyLine), rev: new Array(NP).fill(0), ptTrips: 0, railTrips: 0, busTrips: 0, allTrips: 0, tripsP: new Array(NP).fill(0) };
   if (S < 2 || !lines.length) { lastCtx = { S: 0, fare, st, lines, ratio: null, groups: [], groupOf: new Map(), PTZ: null, RZ: null }; return res; }
@@ -850,8 +886,8 @@ async function computeDemand(m, ver) {
     const board = new Float64Array(S), boardP = new Float64Array(S * NP), boardB = new Float64Array(S * NB);
     const rev = new Float64Array(NP), tripsP = new Float64Array(NP);
     const Lr = new Float64Array(lines.length), Lrev = new Float64Array(lines.length), LOAD = new Float64Array(TS * 2), LB = new Float64Array(TS * 2 * NB);
-    let ptTrips = 0, railTrips = 0, busTrips = 0, allTrips = 0;
-    const mc = { p: [0, 0, 0, 0, 0], pt: 0 }, KR = new Float64Array(4 * Q), KT = new Int32Array(4), KS = new Int32Array(4);
+    let ptTrips = 0, railTrips = 0, busTrips = 0, allTrips = 0, realTrips = 0;
+    const mc = { p: [0, 0, 0, 0, 0, 0], pt: 0, real: 0 }, KR = new Float64Array(4 * Q), KT = new Int32Array(4), KS = new Int32Array(4);
     for (const { o, list } of ODL) {
       const sources = o.acc;
       let t0 = performance.now();
@@ -869,7 +905,8 @@ async function computeDemand(m, ver) {
           allTrips += flow * 2;
           const k = PK[p]; if (!done[k]) pick(k); const bt = bt_[k]; if (bt < 0) continue;
           const Wg = W[GK[k]], rail = Wg.rail[bt];
-          shares(dk, k === 0 ? 0 : 1, PROF[PROF_K[k]], best[k], rail, mc);
+          shares(dk, k === 0 ? 0 : 1, PROF[PROF_K[k]], best[k], rail, mc, realCost(dk, o.c.rw, d.c.rw, PROF[PROF_K[k]]));
+          realTrips += flow * 2 * mc.real;
           PTZ[zi * 4 + k] = mc.pt; if (rail) RZ[zi] |= 1 << k;
           const riders = flow * mc.pt, bs = Wg.src[bt], pp = PURP[p];
           if (!(riders > 0)) continue;
@@ -931,7 +968,7 @@ async function computeDemand(m, ver) {
       res.lines[l] = { riders: Lr[l], revenue: Math.max(0, Lrev[l]), load, cap, maxCrowd: Math.max(0, ...load[0], ...load[1]) / cap, bandCrowd, lb, bandCap: bt.map(x => x * ln.cap) };
     }
     res.stations = Array.from(board, (b, s) => ({ board: b, byP: Array.from(boardP.subarray(s * NP, s * NP + NP)), byB: Array.from(boardB.subarray(s * NB, s * NB + NB)) }));
-    Object.assign(res, { rev: Array.from(rev), tripsP: Array.from(tripsP), ptTrips, railTrips, busTrips, allTrips });
+    Object.assign(res, { rev: Array.from(rev), tripsP: Array.from(tripsP), ptTrips, railTrips, busTrips, allTrips, realTrips });
     lastCtx = { S, fare, st, lines, ratio, groups: GR, groupOf, PTZ, RZ };
     lap('assign');
     // どこも混んでいなければ（定員の70%以下）、2回目は1回目と同じ結果になるので省く
@@ -1270,7 +1307,7 @@ const RANK = { quarter: 3, neighbourhood: 2, suburb: 2, village: 2, hamlet: 1 };
 function computeZones(gran) {
   let loaded = [...cells.values()].filter(c => c.pop >= 1 || c.jobs >= 1);
   if (!loaded.length) return { zones: [], od: [] };
-  ensureDenoms();
+  ensureDenoms(); ensureRealAccess();
   const gOf = lastCtx.groupOf || new Map();
   let accOf = c => gOf.get(c) ?? -1;
   // 範囲が広いときは 1km 四方にまとめて計算する（表示用なので少し粗くてよい）
@@ -1283,6 +1320,7 @@ function computeZones(gran) {
       g.pop += c.pop; g.jobs += c.jobs; g.lat += c.lat * w; g.lon += c.lon * w; g.w += w;
       g.hotel = (g.hotel || 0) + (c.hotel || 0); g.shop = (g.shop || 0) + c.shop; g.attr = (g.attr || 0) + c.attr;
       if (c.airport) { g.airport = (g.airport || 0) + c.airport; g.airDen = c.airDen; }
+      if (!(g.rw <= c.rw)) g.rw = c.rw;
       for (let p = 0; p < NP; p++) { g.A[p] += c.A[p]; g.dsum[p] += c.den[p] * (c.pop + 0.01); }
       g.pw += c.pop + 0.01;
       const gi = gOf.get(c); if (gi != null && w > g.accW) { g.acc = gi; g.accW = w; }
@@ -1311,7 +1349,7 @@ function computeZones(gran) {
     for (let z = 0; z < Zn; z++) { const d = distKm(c, centers[z]); if (d < bd) { bd = d; bi = z; } }
     if (bd * 1000 <= gran * 1.2) zoneOf.set(c, bi);
   }
-  const Z = centers.map(c => ({ name: c.name, lat: 0, lon: 0, w: 0, pop: 0, jobs: 0, gen: [0, 0, 0, 0, 0], attr: 0, pAll: new Array(NP).fill(0), pPt: new Array(NP).fill(0), bAll: new Array(NP * NB).fill(0), bPt: new Array(NP * NB).fill(0) }));
+  const Z = centers.map(c => ({ name: c.name, lat: 0, lon: 0, w: 0, pop: 0, jobs: 0, gen: [0, 0, 0, 0, 0, 0], attr: 0, pAll: new Array(NP).fill(0), pPt: new Array(NP).fill(0), bAll: new Array(NP * NB).fill(0), bPt: new Array(NP * NB).fill(0) }));
   for (const [c, z] of zoneOf) { const Zz = Z[z]; Zz.pop += c.pop; Zz.jobs += c.jobs; const w = c.pop + c.jobs; Zz.lat += c.lat * w; Zz.lon += c.lon * w; Zz.w += w; }
   Z.forEach((z, k) => { if (z.w > 0) { z.lat /= z.w; z.lon /= z.w; } else { z.lat = centers[k].lat; z.lon = centers[k].lon; } });
   const od = new Map(); // zo*Zn+zd -> [total, 公共交通]
@@ -1328,8 +1366,8 @@ function computeZones(gran) {
       let tot = 0, pt = 0;
       for (let p = 0; p < NP; p++) {
         const flow = fl[p]; if (flow < 0.01) continue;
-        const pp = PURP[p], mc = zoneMC(p, oAcc, dAcc, dk);
-        for (let m = 0; m < 5; m++) Zo.gen[m] += flow * mc.p[m];
+        const pp = PURP[p], mc = zoneMC(p, oAcc, dAcc, dk, o.rw, d.rw);
+        for (let m = 0; m < 6; m++) Zo.gen[m] += flow * mc.p[m];
         const f2 = flow * mc.pt;
         Zo.pAll[p] += flow; Zo.pPt[p] += f2;
         for (let b = 0; b < NB; b++) { const sh = (pp.out[b] + pp.ret[b]) / 2; Zo.bAll[p * NB + b] += flow * sh; Zo.bPt[p * NB + b] += f2 * sh; }
@@ -1357,7 +1395,7 @@ function postZones() {
 function sendCells() {
   if (!cellsDirty) return; cellsDirty = false;
   const out = []; for (const c of cells.values()) if (c.pop >= 1 || c.jobs >= 1) out.push([c.i, c.j, Math.round(c.pop), Math.round(c.jobs)]);
-  postMessage({ type: 'cells', cells: out, latStep: LAT_STEP, lonStep: LON_STEP });
+  postMessage({ type: 'cells', cells: out, latStep: LAT_STEP, lonStep: LON_STEP, real: [...realSt.values()].map(r => [r.lon, r.lat, r.name]) });
 }
 
 onmessage = async (ev) => {
@@ -1399,7 +1437,7 @@ onmessage = async (ev) => {
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], 1500, 12, null);
     postMessage({ type: 'name', id: m.id, name: nearestPlaceName(m.lat, m.lng), names: nearestPlaceNames(m.lat, m.lng) });
   } else if (m.type === 'area') {
-    const ver = ++areaVer; zoneGran = m.gran;
+    const ver = ++areaVer; zoneGran = m.gran; if (m.real != null) REAL_ON = !!m.real;
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], m.radius, m.maxTiles, ver);
     if (ver !== areaVer) return;
     sendCells(); postZones();
@@ -1465,7 +1503,7 @@ const AIRPORTS = [
 ].map(([name, lat, lng, pax]) => ({ name, lat, lng, pax }));
 const nearAirport = (lng, lat, m = 1500) => AIRPORTS.find(a => hav([a.lng, a.lat], [lng, lat]) <= m);
 const BANDS = ['6〜10時', '10〜16時', '16〜20時', '20〜24時', '0〜6時'];
-const MODES = [['鉄道', '#1f7a4d'], ['バス', '#1565c0'], ['徒歩', '#e0a526'], ['自転車', '#5aa0c8'], ['車', '#8d6e63']];
+const MODES = [['鉄道', '#1f7a4d'], ['バス', '#1565c0'], ['徒歩', '#e0a526'], ['自転車', '#5aa0c8'], ['車', '#8d6e63'], ['既存の鉄道', '#9e9e9e']];
 
 let G = null;                         // セーブされる状態
 const LD = new Map();                 // 路線の派生データ（経路・ダイヤ）
@@ -1493,6 +1531,7 @@ function applyRegion() {
   FRT.kmCost = BASE.FRT.kmCost * r.op;
 }
 const ui = { me: 1, zoneR: 6000, zones: { on: false, gran: 1200, data: null }, tool: 'select', level: 0, drawing: null, lineBuild: null, sel: null, speed: 1, heat: 'none', cursor: null, mode: 'blank', colorMode: 'line', route: null, radius: 'auto', ptMode: 'all' };
+let realStations = []; // 既存の鉄道の駅 [経度, 緯度, 名前]（現実モードの競合）
 let demand = null, fdemand = null, cellsData = null, cellIndex = new Map();
 let map, worker, mapReady = false, reqId = 0, demandTimer = null, lastReq = null;
 const pending = new Map();            // ワーカーへの問い合わせの返事待ち
@@ -2163,7 +2202,7 @@ function initWorker(tileUrl) {
   worker.onmessage = ev => {
     const m = ev.data;
     if (m.type === 'progress') setStatus(`${m.what === '地域' ? '地域の' : ''}建物データ読込中 ${m.done}/${m.total}`);
-    else if (m.type === 'cells') { cellsData = m; cellIndex = new Map(m.cells.map(c => [c[0] + '_' + c[1], c])); renderMesh(); }
+    else if (m.type === 'cells') { realStations = m.real || []; cellsData = m; cellIndex = new Map(m.cells.map(c => [c[0] + '_' + c[1], c])); renderMesh(); }
     else if (m.type === 'error') { setStatus(m.msg); requestDemand.busy = false; requestDemand.key = null; }
     else if (m.type === 'name') {
       const s = stById(m.id);
@@ -2186,7 +2225,7 @@ function initWorker(tileUrl) {
       if (m.reqId !== reqId) return;
       requestDemand.busy = false;
       const r = m.res, ids = lastReq.stationIds, lids = lastReq.lineIds;
-      demand = { rev: r.rev, tripsP: r.tripsP, ptTrips: r.ptTrips, railTrips: r.railTrips, busTrips: r.busTrips, allTrips: r.allTrips, st: new Map(), ln: new Map() };
+      demand = { rev: r.rev, tripsP: r.tripsP, ptTrips: r.ptTrips, railTrips: r.railTrips, busTrips: r.busTrips, allTrips: r.allTrips, realTrips: r.realTrips || 0, st: new Map(), ln: new Map() };
       r.stations.forEach((s, i) => demand.st.set(ids[i], s));
       demand.svc = new Map();
       r.lines.forEach((l, i) => { const x = lastReq.svc[i]; demand.svc.set(x.lid + ':' + x.si, l); });
@@ -2235,7 +2274,7 @@ function requestDemand() {
     lastReq = { stationIds: stations.map(s => s.id), lineIds: svcs.map(x => x.L.id), svc: svcs.map(x => ({ lid: x.L.id, si: x.si, idx: x.sv.idx, type: x.sv.type })), idx };
     if (!lines.length) { requestDemand.key = null; demand = null; setStatus('路線を作ると乗客が発生します'); renderPanel(); return; }
     const msg = {
-      type: 'compute', fares: G.companies.map(c => c.fare), dens: regionEcon().dens,
+      type: 'compute', fares: G.companies.map(c => c.fare), dens: regionEcon().dens, real: G.mode === 'real',
       stations: stations.map(s => ({ lng: s.lng, lat: s.lat, kind: s.kind })),
       lines: svcs.map(({ L, sv, si, tt }) => {
         const co = Math.max(0, G.companies.findIndex(c => c.id === (L.owner ?? 1))), d = LD.get(L.id);
@@ -2273,6 +2312,13 @@ function requestFreight() {
   worker.postMessage(msg);
 }
 let lastFReq = null;
+// いちばん近い既存の鉄道の駅（現実モード）
+function nearestReal(lng, lat, maxM = 1200) {
+  if (G?.mode !== 'real') return null;
+  let best = null, bd = maxM;
+  for (const r of realStations) { if (Math.abs(r[1] - lat) > 0.02) continue; const d = hav([r[0], r[1]], [lng, lat]); if (d < bd) { bd = d; best = { name: r[2], d }; } }
+  return best;
+}
 // 地価：まわり1kmの人口＋従業者の密度から、駅・線路の建設費の倍率を決める（都心1.0〜郊外・田舎0.5）
 const landFactor = dens => Math.max(0.5, Math.min(1, 0.45 + 0.55 * Math.sqrt(Math.max(0, dens) / 25000)));
 const stBase = s => COST[s.level].st * (s.lf ?? 1);
@@ -2570,7 +2616,7 @@ function showZones(on) {
     if (map.getZoom() < 11) map.easeTo({ zoom: 11.5 });
     const c = map.getCenter();
     setStatus('地域の建物データを読み込み中…');
-    worker.postMessage({ type: 'area', lat: c.lat, lng: c.lng, radius: ui.zoneR, maxTiles: { 6000: 64, 10000: 170, 15000: 380 }[ui.zoneR] || 64, gran: ui.zones.gran });
+    worker.postMessage({ type: 'area', lat: c.lat, lng: c.lng, radius: ui.zoneR, maxTiles: { 6000: 64, 10000: 170, 15000: 380 }[ui.zoneR] || 64, gran: ui.zones.gran, real: G.mode === 'real' });
   } else {
     worker.postMessage({ type: 'zonesOff' }); ui.zones.data = null;
     if (ui.sel?.type === 'zone') ui.sel = null;
@@ -3379,6 +3425,7 @@ function panelStation(s) {
   <div>${bus ? 'バス停' : '駅'}勢圏の人口</div><div>${ca ? '約' + fmtNum(ca.pop) + '人' : '読込前'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の従業者</div><div>${ca ? '約' + fmtNum(ca.jobs) + '人' : '読込前'}</div></div>
   <p class="small">${bus ? 'バス停の利用圏は半径600m' : '駅勢圏は駅から半径1.2km（徒歩約20分）'}です。300m以内の駅・バス停とは歩いて乗り換えられます。</p>
+  ${(r => G.mode === 'real' ? `<div class="netbox">${r ? `既存の鉄道の「${esc(r.name)}」が${fmtKm(r.d)}先にあり、競合します。` : '近く（1.2km以内）に既存の鉄道の駅はありません。この駅のまわりの人は、既存の鉄道を使えません。'}</div>` : '')(nearestReal(s.lng, s.lat))}
   ${(ap => ap ? `<div class="netbox">${ap.name}の${hav([ap.lng, ap.lat], [s.lng, s.lat]) <= (bus ? 600 : 1200) ? 'アクセス' : '近く'}（${fmtKm(hav([ap.lng, ap.lat], [s.lng, s.lat]))}）。空港の利用者は1日約${fmtMan(ap.pax * 1e6 / 365 * 0.9)}人。${hav([ap.lng, ap.lat], [s.lng, s.lat]) <= (bus ? 600 : 1200) ? '' : `<br>空港客を乗せるには、ターミナルから${bus ? '600m' : '1.2km'}以内に置いてください。`}</div>` : '')(nearAirport(s.lng, s.lat, 2500))}
   ${d && d.board > 0 ? `<h3>利用目的（平日）</h3>${purposeBlock(d.byP)}<h3>時間帯ごとの乗車</h3>${bandBars(d.byB, '#3b78c3')}` : ''}
   <h3>のりば</h3>
@@ -3541,6 +3588,7 @@ function panelLine(L) {
   <p class="small">両数を増やすと定員が増えて混雑が減りますが、運行費が上がります。増結は1両${fmtYen(RAIL.carCost)}×保有編成数です。</p>`}
   <h3>路線図</h3>
   ${lineDiagram(L, r)}
+  ${G.mode === 'real' && (isRail(L) || isBus(L)) ? (() => { const near = L.stops.filter(id => { const s = stById(id); return s && nearestReal(s.lng, s.lat, 800); }); return `<h3>既存の鉄道との競合</h3><p class="small">${L.stops.length}${isBus(L) ? '停留所' : '駅'}のうち${near.length}か所の近く（800m以内）に既存の鉄道の駅があります。${near.length >= 2 ? '同じ区間では既存の鉄道と乗客を取り合います。所要時間・本数・運賃で勝てるようにしましょう。' : '既存の鉄道とあまり重ならない路線です。'}</p>`; })() : ''}
   ${(() => { const cs = competitors(L); if (!cs.length) return '';
     return `<h3>競合する他社の路線</h3><div class="list">${cs.map(c => { const rr = demand?.ln.get(c.M.id), f = coById(c.M.owner ?? 1)?.fare;
       return `<div class="item" data-line="${c.M.id}"><span>${badge(c.M)} ${esc(c.M.name)}<br><span class="small">${esc(coById(c.M.owner ?? 1)?.name || '')}・重なる駅${c.covered.length}</span></span><span class="small">${rr ? fmtMan(rr.riders) + '人/日' : ''}<br>${f ? (isBus(c.M) ? `運賃${f.busMode === 'dist' ? '対キロ' : fmtNum(f.bus) + '円'}` : `初乗り${fmtNum(f.base)}円`) : ''}</span></div>`; }).join('')}</div>
@@ -3714,7 +3762,9 @@ function panelOverview() {
   <div>運賃収入</div><div>${fmtYen(rev)}</div><div>運行費</div><div>${fmtYen(c.op)}</div><div>駅・バス停の運営費</div><div>${fmtYen(c.st)}</div><div>線路の保守費</div><div>${fmtYen(c.maint)}</div>${c.fee ? `<div>乗り入れの使用料（支払い）</div><div>${fmtYen(c.fee)}</div>` : ''}${c.feeIn ? `<div>乗り入れの使用料（受け取り）</div><div class="pos">+${fmtYen(c.feeIn)}</div>` : ''}
   <div>損益</div><div class="${net < 0 ? 'neg' : 'pos'}">${fmtYen(net)}</div>
   <div>沿線の公共交通分担率</div><div>${demand ? share.toFixed(1) + '%' : '―'}</div>
+  ${G.mode === 'real' && demand ? `<div>既存の鉄道の利用（競合）</div><div>${fmtNum(demand.realTrips)}人</div><div>自社のシェア（自社÷自社＋既存）</div><div>${Math.round(coRiders(ui.me) / Math.max(1, coRiders(ui.me) + demand.realTrips) * 100)}%</div>` : ''}
   ${fdemand ? `<div>貨物（全社）</div><div>${fmtNum(fdemand.tons)}トン/日</div>` : ''}</div>
+  ${G.mode === 'real' ? '<p class="small">現実モードでは、JR・私鉄・地下鉄などの既存の鉄道が競合です。出発地と目的地の両方の近く（1.2km以内）に既存の駅があると、乗客は既存の鉄道と所要時間・運賃・乗り換えを比べて選びます。既存の駅がない所や、既存の鉄道より速い・安いルートを狙いましょう。</p>' : ''}
   <p class="small">1日が終わると、その日の収支の${ECON}日分が資金に計上されます。土休日は通勤・通学が減り、買い物・レジャー・観光が増えます。</p>
   ${demand && demand.ptTrips > 0 ? `<h3>乗客の利用目的（平日）</h3>${purposeBlock(demand.tripsP)}` : ''}
   <h3>鉄道路線（${G.lines.filter(L => mine(L) && isRail(L)).length}）</h3>
