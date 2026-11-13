@@ -596,6 +596,10 @@ const PURP = [
   { name: '空港', special: true, rate: 0, lam: AIR_LAM, attr: () => 0, bg: 0, peak: false, prof: 'airport', out: [.30, .35, .25, .10, 0], ret: [.08, .30, .32, .28, .02], hpk: .3 },
 ];
 for (const p of PURP) p.gen ??= c => c.pop;
+// 距離の減り方（目的に tail・lam2 を設定すると遠くまで行く人の「すそ」をつけられる）
+const KER = (pp, d) => pp.tail ? (1 - pp.tail) * Math.exp(-d / pp.lam) + pp.tail * Math.exp(-d / pp.lam2) : Math.exp(-d / pp.lam);
+const KINT = pp => 2 * Math.PI * (pp.tail ? (1 - pp.tail) * pp.lam * pp.lam + pp.tail * pp.lam2 * pp.lam2 : pp.lam * pp.lam); // 一様な密度で全方向に積分した値
+const KMAX = pp => Math.max(pp.lam, pp.lam2 || 0) * 5;
 const NP = PURP.length, NB = 5, P_AIR = PURP.findIndex(p => p.special);
 const PK = PURP.map(p => { const pr = p.prof || 'resident'; return pr === 'resident' ? (p.peak ? 0 : 1) : pr === 'visitor' ? 2 : 3; }); // 目的→交通手段の選び方の種類
 let cellsVer = 0, denomVer = -1, REG_DENS = 1; // REG_DENS：読み込んだ範囲の外の行き先の多さ（地方は少ない）
@@ -604,7 +608,7 @@ function ensureDenoms() {
   if (denomVer === cellsVer) return;
   const all = [...cells.values()];
   for (const k of all) k.A = PURP.map(p => p.attr(k));
-  const bg = PURP.map(p => p.bg * REG_DENS * 2 * Math.PI * p.lam * p.lam);
+  const bg = PURP.map(p => p.bg * REG_DENS * KINT(p));
   const sup = new Map();
   for (const k of all) {
     const key = Math.floor(k.i / 4) + '_' + Math.floor(k.j / 4);
@@ -613,12 +617,21 @@ function ensureDenoms() {
     const w = 1 + k.pop + k.jobs; g.lat += k.lat * w; g.lon += k.lon * w; g.w += w;
   }
   const SG = [...sup.values()]; for (const g of SG) { g.lat /= g.w; g.lon /= g.w; }
+  // 読み込んだ範囲の外の行き先の多さは、その場所のまわり（6km）の実際の密度から見積もる（郊外では少ない）。上限は都心の値
+  const TC = loadedTiles.map(([x, y]) => { const n = 2 ** Z, lon = (x + 0.5) / n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI, w = 40075 / n * Math.cos(lat * Math.PI / 180); return { lat, lon, area: w * w }; });
+  for (const g of SG) {
+    let area = 0; const a = new Array(NP).fill(0);
+    for (const t of TC) if (distKm(g, t) <= 6) area += t.area;
+    for (const h of SG) if (distKm(g, h) <= 6) for (let p = 0; p < NP; p++) a[p] += h.A[p];
+    g.bg = PURP.map((pp, p) => { const cap = pp.bg * REG_DENS; if (!area) return bg[p]; return Math.max(cap * 0.1, Math.min(cap, a[p] / area)) * KINT(pp); });
+    for (const k of g.cells) k.bgL = g.bg;
+  }
   for (const c of all) {
-    const den = bg.slice();
+    const den = (c.bgL || bg).slice();
     for (const g of SG) {
       const dg = distKm(c, g);
-      if (dg > 3) { for (let p = 0; p < NP; p++) { const a = g.A[p]; if (a > 0 && dg < PURP[p].lam * 5) den[p] += a * Math.exp(-dg / PURP[p].lam); } }
-      else for (const k of g.cells) { const d = distKm(c, k); for (let p = 0; p < NP; p++) { const a = k.A[p]; if (a > 0) den[p] += a * Math.exp(-d / PURP[p].lam); } }
+      if (dg > 3) { for (let p = 0; p < NP; p++) { const a = g.A[p]; if (a > 0 && dg < KMAX(PURP[p])) den[p] += a * KER(PURP[p], dg); } }
+      else for (const k of g.cells) { const d = distKm(c, k); for (let p = 0; p < NP; p++) { const a = k.A[p]; if (a > 0) den[p] += a * KER(PURP[p], d); } }
     }
     c.den = den;
   }
@@ -636,7 +649,7 @@ function flowsFor(o, d, dk, fl, min) {
   let any = false;
   for (let p = 0; p < NP; p++) {
     if (p === P_AIR) { fl[p] = d.airport ? 0.5 * d.airport * airW(o) * Math.exp(-dk / AIR_LAM) / (d.airDen || 1) : 0; }
-    else { const a = d.A[p], g = PURP[p].gen(o); fl[p] = a > 0 && g > 0 ? g * PURP[p].rate * a * Math.exp(-dk / PURP[p].lam) / o.den[p] : 0; }
+    else { const a = d.A[p], g = PURP[p].gen(o); fl[p] = a > 0 && g > 0 ? g * PURP[p].rate * a * KER(PURP[p], dk) / o.den[p] : 0; }
     if (fl[p] >= min) any = true;
   }
   return any;
@@ -1376,6 +1389,12 @@ onmessage = async (ev) => {
     if (ver !== freightVer) return;
     let res; try { res = computeFreight(m); } catch (e) { postMessage({ type: 'error', msg: '貨物の計算でエラー: ' + e.message }); return; }
     postMessage({ type: 'freight', res });
+  } else if (m.type === 'density') {
+    // 地価の目安：その地点から1km以内の人口＋従業者の密度（人/km²）
+    await ensureTilesAround([{ lat: m.lat, lng: m.lng }], 1000, 9, null);
+    let sum = 0; const p = { lat: m.lat, lon: m.lng };
+    for (const c of cells.values()) if (Math.abs(c.lat - m.lat) < 0.012 && distKm(c, p) <= 1) sum += c.pop + c.jobs;
+    postMessage({ type: 'density', key: m.key, dens: sum / Math.PI });
   } else if (m.type === 'name') {
     await ensureTilesAround([{ lat: m.lat, lng: m.lng }], 1500, 12, null);
     postMessage({ type: 'name', id: m.id, name: nearestPlaceName(m.lat, m.lng), names: nearestPlaceNames(m.lat, m.lng) });
@@ -2103,7 +2122,7 @@ function coRevenue(cid, day) {
   // 貨物は土休日に減る
   return r * f + fr * (dayFactors(day).holiday ? 0.6 : 1);
 }
-const trackMaint = t => t.len / 1000 * COST[t.level].maint * (t.single ? SINGLE_RATE : 1);
+const trackMaint = t => t.len / 1000 * COST[t.level].maint * (t.single ? SINGLE_RATE : 1) * (t.lf ?? 1);
 function coRiders(cid) { if (!demand) return 0; let r = 0; for (const L of G.lines) if ((L.owner ?? 1) === cid) r += demand.ln.get(L.id)?.riders || 0; return r; }
 function dayFactors(day) { const w = dateOf(day).getDay(); return { holiday: w === 0 || w === 6 }; }
 // 土休日は通勤・通学が減り、買い物・レジャー・観光が増える
@@ -2152,6 +2171,7 @@ function initWorker(tileUrl) {
     }
     else if (m.type === 'censusOk') { setStatus(`統計データ ${fmtNum(m.n)}メッシュを使用中`); requestDemand(); }
     else if (m.type === 'busroute') { const cb = pending.get(m.key); pending.delete(m.key); if (cb) cb(m.coords); }
+    else if (m.type === 'density') { const cb = pending.get(m.key); pending.delete(m.key); if (cb) cb(m.dens); }
     else if (m.type === 'route') { if (window.__perf) console.log('[perf] route worker ms', Math.round(m.ms)); if (ui.route && ui.route.reqId === m.reqId) { ui.route.fast = m.fast; ui.route.avoid = m.avoid; ui.route.loading = false; renderPanel(); renderPreview(); } }
     else if (m.type === 'zones') { if (window.__perf) console.log('[perf] zones ms', Math.round(m.ms)); ui.zones.data = m; setStatus(`地域 ${m.zones.length}か所の移動量を表示中`); renderZones(); if (ui.sel?.type === 'zone' || (!ui.sel && !ui.lineBuild && ui.tool === 'select')) renderPanel(); }
     else if (m.type === 'freight') {
@@ -2253,6 +2273,14 @@ function requestFreight() {
   worker.postMessage(msg);
 }
 let lastFReq = null;
+// 地価：まわり1kmの人口＋従業者の密度から、駅・線路の建設費の倍率を決める（都心1.0〜郊外・田舎0.5）
+const landFactor = dens => Math.max(0.5, Math.min(1, 0.45 + 0.55 * Math.sqrt(Math.max(0, dens) / 25000)));
+const stBase = s => COST[s.level].st * (s.lf ?? 1);
+function askDensity(ll, cb) {
+  const key = Math.random().toString(36).slice(2);
+  pending.set(key, cb);
+  worker.postMessage({ type: 'density', key, lng: ll[0], lat: ll[1] });
+}
 function askBusRoute(a, b, cb) {
   const key = Math.random().toString(36).slice(2);
   pending.set(key, cb);
@@ -2674,9 +2702,15 @@ function stationNear(pt, px = 16, kind, own) {
 function buildStation(e) {
   const ll = [e.lngLat.lng, e.lngLat.lat];
   if (G.stations.some(s => isRailSt(s) && mine(s) && hav([s.lng, s.lat], ll) < 250)) return toast('近くに自社の駅があります（250m以上離してください）');
-  const c = COST[ui.level].st * (ui.single ? SINGLE_RATE : 1);
-  if (myCo().money < c) return toast(`資金が足りません（必要：${fmtYen(c)}）`);
-  dispatch({ type: 'station', ll, level: ui.level, name: nearbyName(e.point), single: !!ui.single });
+  const name = nearbyName(e.point), level = ui.level, single = !!ui.single;
+  if (!worker) return;
+  setStatus('土地を調べています…');
+  askDensity(ll, dens => {
+    const lf = Math.round(landFactor(dens) * 100) / 100, c = COST[level].st * (single ? SINGLE_RATE : 1) * lf;
+    setStatus('');
+    if (myCo().money < c) return toast(`資金が足りません（必要：${fmtYen(c)}）`);
+    dispatch({ type: 'station', ll, level, name, single, lf });
+  });
 }
 // 港：海・川・湖のそば（400m以内）に置く
 function nearWater(e) {
@@ -2755,11 +2789,13 @@ function smoothPath(cs, R) {
 // 曲線半径による速度制限（目安：V = 4√R km/h、最高90km/h）
 const curveSpeed = R => Math.min(RAIL.speed, 4 * Math.sqrt(R) / 3.6);
 const fmtR = R => R === Infinity ? '直線' : `R${Math.round(R / 10) * 10}m`;
-function trackCost(coords, level, single = ui.single) {
+function trackCost(coords, level, single = ui.single, lf = 1) {
   const len = polyLen(coords);
   const wet = level === 0 || level === 2 ? waterLength(coords) : 0;
-  return { len, wet, cost: ((len - wet) / 1000 * COST[level].km + wet / 1000 * BRIDGE_KM) * (single ? SINGLE_RATE : 1) };
+  return { len, wet, lf, cost: ((len - wet) / 1000 * COST[level].km * lf + wet / 1000 * BRIDGE_KM) * (single ? SINGLE_RATE : 1) };
 }
+// 線路の地価：両端の駅の地価の平均
+const trackLf = (a, b) => Math.round(((a?.lf ?? 1) + (b?.lf ?? 1)) / 2 * 100) / 100;
 function onTrackClick(e) {
   const s = stationNear(e.point, 16, 'rail', true);
   if (!ui.drawing) { if (s) { ui.drawing = { from: s.id, pts: [] }; renderPreview(); updateHint(); } else toast('線路は駅から引き始めてください'); return; }
@@ -2767,10 +2803,10 @@ function onTrackClick(e) {
   if (s) {
     const a = stById(ui.drawing.from);
     const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, [s.lng, s.lat]], ui.radius), coords = round6(sm.coords);
-    const c = trackCost(coords, ui.level);
+    const c = trackCost(coords, ui.level, ui.single, trackLf(a, s));
     if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
     const vmax = ui.level === 2 ? Math.min(TRAM_SPEED, curveSpeed(sm.minR)) : curveSpeed(sm.minR);
-    dispatch({ type: 'track', a: a.id, b: s.id, coords, level: ui.level, len: c.len, cost: c.cost, minR: sm.minR === Infinity ? null : Math.round(sm.minR), vmax, single: !!ui.single,
+    dispatch({ type: 'track', a: a.id, b: s.id, coords, level: ui.level, len: c.len, cost: c.cost, lf: c.lf, minR: sm.minR === Infinity ? null : Math.round(sm.minR), vmax, single: !!ui.single,
       msg: `${a.name}〜${s.name}　${COST[ui.level].name}${ui.single ? '・単線' : ''} ${fmtKm(c.len)}${c.wet > 20 ? `（うち橋梁 ${fmtKm(c.wet)}）` : ''}${sm.minR < Infinity ? `　最小${fmtR(sm.minR)}・制限${Math.round(vmax * 3.6)}km/h` : ''}　${fmtYen(c.cost)}` });
     ui.drawing = { from: s.id, pts: [] };
     renderPreview();
@@ -3003,10 +3039,11 @@ function applyAct(a, cid) {
   const own = x => x && (x.owner ?? 1) === cid;
   switch (a.type) {
     case 'station': {
-      const c = COST[a.level].st * (a.single ? SINGLE_RATE : 1); if (!pay(c)) return '資金が足りません';
+      const lf = Math.max(0.5, Math.min(1, +a.lf || 1)), c = COST[a.level].st * (a.single ? SINGLE_RATE : 1) * lf; if (!pay(c)) return '資金が足りません';
       const ap = nearAirport(a.ll[0], a.ll[1], 1000);
       const s = newStop('rail', a.ll, cid, a.level, uniqueName(ap ? ap.name : a.name, null, a.ll));
       if (a.single) s.single = true;
+      if (lf < 1) s.lf = lf;
       if (ap) s.autoName = false; // 空港の近くなら「〇〇空港駅」
       return `${s.name}（${s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (a.single ? '・単線' : '') + '駅'}）を建設しました　${fmtYen(c)}`;
     }
@@ -3022,14 +3059,14 @@ function applyAct(a, cid) {
     }
     case 'cargo': {
       const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.cargo) return null;
-      const c = COST[st.level].st * 0.3; if (!pay(c)) return `貨物ホームの工事に${fmtYen(c)}かかります。資金が足りません`;
+      const c = stBase(st) * 0.3; if (!pay(c)) return `貨物ホームの工事に${fmtYen(c)}かかります。資金が足りません`;
       st.cargo = true; return `${st.name}で貨物の取り扱いを始めました（貨物ホーム ${fmtYen(c)}）`;
     }
     case 'double': {
       // 単線の線路・駅を複線（2線）にする：最初に節約した分の工事費がかかる
-      if (a.what === 'track') { const t = tkById(a.id); if (!own(t) || !t.single) return null; const c = trackCost(t.coords, t.level, false).cost * SINGLE_RATE; if (!pay(c)) return `複線化の工事に${fmtYen(c)}かかります。資金が足りません`; t.single = false; return `線路を複線にしました（${fmtYen(c)}）`; }
+      if (a.what === 'track') { const t = tkById(a.id); if (!own(t) || !t.single) return null; const c = trackCost(t.coords, t.level, false, t.lf ?? 1).cost * SINGLE_RATE; if (!pay(c)) return `複線化の工事に${fmtYen(c)}かかります。資金が足りません`; t.single = false; return `線路を複線にしました（${fmtYen(c)}）`; }
       const st = stById(a.id); if (!own(st) || !st.single) return null;
-      const c = COST[st.level].st * SINGLE_RATE; if (!pay(c)) return `駅の2線化の工事に${fmtYen(c)}かかります。資金が足りません`;
+      const c = stBase(st) * SINGLE_RATE; if (!pay(c)) return `駅の2線化の工事に${fmtYen(c)}かかります。資金が足りません`;
       st.single = false; return `${st.name}を2線の駅（すれ違い・2方向同時発着ができる）にしました（${fmtYen(c)}）`;
     }
     case 'perDay': { const L = lnById(a.id); if (!own(L) || !isCargoL(L) || !PER_DAY.includes(a.v)) return null; const old = L.perDay; L.perDay = a.v;
@@ -3044,7 +3081,7 @@ function applyAct(a, cid) {
     case 'track': {
       if (!usableBy(stById(a.a), cid) || !usableBy(stById(a.b), cid)) return '乗り入れを許可していない会社の駅には線路をつなげません';
       if (!pay(a.cost)) return '資金が足りません';
-      G.tracks.push({ id: nid(), owner: cid, a: a.a, b: a.b, coords: a.coords, level: a.level, len: a.len, minR: a.minR, vmax: a.vmax, ...(a.single ? { single: true } : {}) });
+      G.tracks.push({ id: nid(), owner: cid, a: a.a, b: a.b, coords: a.coords, level: a.level, len: a.len, minR: a.minR, vmax: a.vmax, ...(a.single ? { single: true } : {}), ...(a.lf && a.lf < 1 ? { lf: a.lf } : {}) });
       return a.msg;
     }
     case 'line': {
@@ -3153,13 +3190,13 @@ function applyAct(a, cid) {
     }
     case 'turnback': {
       const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.turnback) return null;
-      const c = COST[st.level].st * 0.4; if (!pay(c)) return `折り返し設備の工事に${fmtYen(c)}かかります。資金が足りません`;
+      const c = stBase(st) * 0.4; if (!pay(c)) return `折り返し設備の工事に${fmtYen(c)}かかります。資金が足りません`;
       st.turnback = true; return `${st.name}に折り返し設備（引き上げ線・渡り線）を設けました（${fmtYen(c)}）`;
     }
     case 'passing': {
       const st = stById(a.id); if (!own(st) || !isRailSt(st) || st.passing) return null;
       if (st.single) return '単線の駅には待避線を設けられません。先に2線の駅にしてください';
-      const c = COST[st.level].st * 0.6; if (!pay(c)) return `待避線の工事に${fmtYen(c)}かかります。資金が足りません`;
+      const c = stBase(st) * 0.6; if (!pay(c)) return `待避線の工事に${fmtYen(c)}かかります。資金が足りません`;
       st.passing = true; return `${st.name}に待避線を設けました（${fmtYen(c)}）`;
     }
     case 'cars': {
@@ -3284,10 +3321,10 @@ function setLevel(lv) { ui.level = lv; document.querySelectorAll('[data-level]')
 function updateHint() {
   const c = COST[ui.level]; let h = '';
   if (ui.tool === 'select') h = '駅・路線・線路・地域の円をクリックすると詳しい情報が出ます。';
-  else if (ui.tool === 'station') h = `地図をクリックして駅を建設します。${ui.level === 2 ? '<br>路面電車の停留場：止まる路線は3両編成まで。' : ''}<br>${c.name}${ui.single ? '・単線' : ''}駅：${fmtYen(c.st * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線の駅に止まる路線は、列車の本数が半分になります。' : ''}`;
+  else if (ui.tool === 'station') h = `地図をクリックして駅を建設します。郊外ほど安く、都心の最大半額です。${ui.level === 2 ? '<br>路面電車の停留場：止まる路線は3両編成まで。' : ''}<br>${c.name}${ui.single ? '・単線' : ''}駅：${fmtYen(c.st * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線の駅に止まる路線は、列車の本数が半分になります。' : ''}`;
   else if (ui.tool === 'track') {
-    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。${ui.level === 2 ? '<br>路面電車の軌道：最高40km/h、走る路線は3両編成まで。' : ''}<br>${c.name}${ui.single ? '・単線' : ''}：1kmあたり${fmtYen(c.km * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線は建設費が半分ですが、通る路線は列車の本数が半分になります。' : ''}`;
-    if (ui.drawing && ui.cursor) { const a = stById(ui.drawing.from); const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, ui.cursor], ui.radius); const len = polyLen(sm.coords); h += `<br><b>${fmtKm(len)}　約${fmtYen(len / 1000 * c.km * (ui.single ? SINGLE_RATE : 1))}</b>${sm.minR < Infinity ? `<br>最小${fmtR(sm.minR)}・制限${Math.round(curveSpeed(sm.minR) * 3.6)}km/h` : ''}`; }
+    h = `駅をクリックして始点を決め、途中の地点をクリックしながら別の駅をクリックすると線路ができます。<br>Esc・右クリックで終了、BackSpaceで1つ戻る。郊外ほど建設費が安くなります（両端の駅の地価で決まります）。${ui.level === 2 ? '<br>路面電車の軌道：最高40km/h、走る路線は3両編成まで。' : ''}<br>${c.name}${ui.single ? '・単線' : ''}：1kmあたり${fmtYen(c.km * (ui.single ? SINGLE_RATE : 1))}${ui.single ? '<br>単線は建設費が半分ですが、通る路線は列車の本数が半分になります。' : ''}`;
+    if (ui.drawing && ui.cursor) { const a = stById(ui.drawing.from); const sm = smoothPath([[a.lng, a.lat], ...ui.drawing.pts, ui.cursor], ui.radius); const len = polyLen(sm.coords); h += `<br><b>${fmtKm(len)}　約${fmtYen(len / 1000 * c.km * (ui.single ? SINGLE_RATE : 1) * (a.lf ?? 1))}〜</b>${sm.minR < Infinity ? `<br>最小${fmtR(sm.minR)}・制限${Math.round(curveSpeed(sm.minR) * 3.6)}km/h` : ''}`; }
   }
   else if (ui.tool === 'line') h = '停車する駅を順番にクリックし、右のパネルで「開業する」を押します。';
   else if (ui.tool === 'busstop') h = `道路沿いをクリックしてバス停を置きます。駅の近くなら「〇〇駅前」になります。<br>1か所 ${fmtYen(BUS.stop)}`;
@@ -3337,6 +3374,7 @@ function panelStation(s) {
   return `<h2>${esc(s.name)}</h2>
   <div class="row"><input id="stName" value="${esc(s.name)}" maxlength="20" style="flex:1"><button class="btn" data-act="renameSt">名前を変更</button></div>
   <div class="kv"><div>種類</div><div>${bus ? 'バス停' : s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (s.single ? '・単線' : '') + '駅'}${s.cargo ? '（貨物取扱）' : ''}</div>
+  ${!bus && s.lf ? `<div>地価（都心＝100%）</div><div>${Math.round(s.lf * 100)}%</div>` : ''}
   <div>乗車人員（平日）</div><div>${d ? fmtNum(d.board) + '人/日' : '―'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の人口</div><div>${ca ? '約' + fmtNum(ca.pop) + '人' : '読込前'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の従業者</div><div>${ca ? '約' + fmtNum(ca.jobs) + '人' : '読込前'}</div></div>
@@ -3347,10 +3385,10 @@ function panelStation(s) {
   <div class="list">${lines.map(L => `<div class="item" data-line="${L.id}"><span>${badge(L)} ${esc(L.name)}</span></div>`).join('') || '<span class="small">なし</span>'}</div>
   ${tr.length ? `<h3>乗り換え（徒歩）</h3><div>${tr.map(badge).join('')}</div>` : ''}
   ${(() => { const a = areaShare(s); return a.m.size > 1 ? `<h3>周辺（800m）の各社の乗車シェア</h3>${shareBar(a.m, a.tot)}` : ''; })()}
-  ${!bus ? `<div class="row">折り返し：${s.turnback ? '<b>できる</b>（途中駅止まりの列車が折り返せます）' : (mine(s) ? `設備なし <button class="btn" data-act="turnback">折り返し設備を設ける（${fmtYen(COST[s.level].st * 0.4)}）</button>` : '設備なし')}</div><p class="small">路線の始発・終着駅は設備がなくても折り返せます。</p>` : ''}
-  ${!bus ? `<div class="row">待避線：${s.passing ? '<b>あり</b>（優等列車の通過待ちができます）' : (mine(s) && !s.single ? `なし <button class="btn" data-act="passing">待避線を設ける（${fmtYen(COST[s.level].st * 0.6)}）</button>` : 'なし')}</div>` : ''}
-  ${!bus && s.single ? `<div class="row">単線の駅（1線）：止まる路線は列車の本数が半分です。${mine(s) ? `<button class="btn" data-act="doubleSt">2線の駅にする（${fmtYen(COST[s.level].st * SINGLE_RATE)}）</button>` : ''}</div>` : ''}
-  ${!bus ? `<div class="row">貨物：${s.cargo ? `<b>取り扱いあり</b>${fdemand?.st.get(s.id) ? `（${fmtNum(fdemand.st.get(s.id).tons)}トン/日）` : ''}` : (mine(s) ? `なし <button class="btn" data-act="cargoSt">貨物の取り扱いを始める（${fmtYen(COST[s.level].st * 0.3)}）</button>` : 'なし')}</div><p class="small">貨物駅にすると、貨物列車・トラック便が発着できます。まわり3kmの事業所・住民から荷物が集まります。</p>` : ''}
+  ${!bus ? `<div class="row">折り返し：${s.turnback ? '<b>できる</b>（途中駅止まりの列車が折り返せます）' : (mine(s) ? `設備なし <button class="btn" data-act="turnback">折り返し設備を設ける（${fmtYen(stBase(s) * 0.4)}）</button>` : '設備なし')}</div><p class="small">路線の始発・終着駅は設備がなくても折り返せます。</p>` : ''}
+  ${!bus ? `<div class="row">待避線：${s.passing ? '<b>あり</b>（優等列車の通過待ちができます）' : (mine(s) && !s.single ? `なし <button class="btn" data-act="passing">待避線を設ける（${fmtYen(stBase(s) * 0.6)}）</button>` : 'なし')}</div>` : ''}
+  ${!bus && s.single ? `<div class="row">単線の駅（1線）：止まる路線は列車の本数が半分です。${mine(s) ? `<button class="btn" data-act="doubleSt">2線の駅にする（${fmtYen(stBase(s) * SINGLE_RATE)}）</button>` : ''}</div>` : ''}
+  ${!bus ? `<div class="row">貨物：${s.cargo ? `<b>取り扱いあり</b>${fdemand?.st.get(s.id) ? `（${fmtNum(fdemand.st.get(s.id).tons)}トン/日）` : ''}` : (mine(s) ? `なし <button class="btn" data-act="cargoSt">貨物の取り扱いを始める（${fmtYen(stBase(s) * 0.3)}）</button>` : 'なし')}</div><p class="small">貨物駅にすると、貨物列車・トラック便が発着できます。まわり3kmの事業所・住民から荷物が集まります。</p>` : ''}
   ${bus ? `<div class="netbox">共用のバス停です。どの会社のバスも止まれます（使用料なし）。${(() => { const cs = [...new Set(G.lines.filter(L => L.stops.includes(s.id)).map(L => L.owner ?? 1))].map(c => coById(c)?.name).filter(Boolean); return cs.length ? '使用中：' + cs.map(esc).join('・') : ''; })()}</div>` : ''}
   ${!mine(s) && !bus ? `<div class="netbox">${accessOf(s.owner ?? 1).allow ? `乗り入れできます。使用料：${bus ? `${fmtNum(accessOf(s.owner ?? 1).stationFee / 10)}円/停車` : `駅 ${fmtNum(accessOf(s.owner ?? 1).stationFee)}円/停車・線路 ${fmtNum(accessOf(s.owner ?? 1).trackFee)}円/編成キロ`}` : 'この会社は乗り入れを認めていません。'}</div>` : ''}
   <p class="small">運営：<i class="linechip" style="background:${coById(s.owner ?? 1)?.color}"></i>${esc(coById(s.owner ?? 1)?.name || '')}</p>
@@ -3376,7 +3414,7 @@ function panelHub(s) {
 function panelTrack(t) {
   const a = stById(t.a), b = stById(t.b);
   return `<h2>線路</h2><div class="kv"><div>区間</div><div>${esc(a.name)}〜${esc(b.name)}</div><div>構造</div><div>${COST[t.level].name}・${t.single ? '単線' : '複線'}</div><div>長さ</div><div>${fmtKm(t.len)}</div><div>最小曲線半径</div><div>${t.minR ? fmtR(t.minR) : '直線'}</div><div>速度制限</div><div>${Math.round((t.vmax || RAIL.speed) * 3.6)}km/h</div><div>保守費</div><div>${fmtYen(trackMaint(t))}/日</div></div>
-  ${t.single ? `<p class="small">単線です。この線路を通る路線は、すれ違いの待ち合わせのため列車の本数が半分になります。</p>${mine(t) ? `<div class="row"><button class="btn" data-act="doubleTk">複線にする（${fmtYen(trackCost(t.coords, t.level, false).cost * SINGLE_RATE)}）</button></div>` : ''}` : ''}
+  ${t.single ? `<p class="small">単線です。この線路を通る路線は、すれ違いの待ち合わせのため列車の本数が半分になります。</p>${mine(t) ? `<div class="row"><button class="btn" data-act="doubleTk">複線にする（${fmtYen(trackCost(t.coords, t.level, false, t.lf ?? 1).cost * SINGLE_RATE)}）</button></div>` : ''}` : ''}
   ${mine(t) ? removeBtn('この線路を撤去する') : `<p class="small">${esc(coById(t.owner ?? 1)?.name || '')}の線路です。${accessOf(t.owner ?? 1).allow ? `乗り入れできます（${fmtNum(accessOf(t.owner ?? 1).trackFee)}円/編成キロ）。` : '乗り入れは認められていません。'}</p>`}`;
 }
 function hwSelect(id, v, attrs = '', allowZero = false, list = HEADWAYS) { return `<select id="${id}" ${attrs}>${allowZero ? `<option value="0" ${!v ? 'selected' : ''}>運転なし</option>` : ''}${list.map(h => `<option value="${h}" ${h === v ? 'selected' : ''}>${fmtHw(h)}ごと</option>`).join('')}</select>`; }
@@ -4142,7 +4180,7 @@ const MATCH_BY = { money: '資金', riders: '1日の輸送人員', value: '企�
 function coAssets(cid) {
   let v = 0;
   for (const t of G.tracks) if ((t.owner ?? 1) === cid) v += t.len / 1000 * COST[t.level].km * 0.6;
-  for (const s of G.stations) if ((s.owner ?? 1) === cid) v += (isBus(s) ? BUS.stop : isPort(s) ? FERRY.port : isDepot(s) ? TRUCK.depot : COST[s.level].st * (s.single ? SINGLE_RATE : 1)) * 0.6;
+  for (const s of G.stations) if ((s.owner ?? 1) === cid) v += (isBus(s) ? BUS.stop : isPort(s) ? FERRY.port : isDepot(s) ? TRUCK.depot : stBase(s) * (s.single ? SINGLE_RATE : 1)) * 0.6;
   for (const L of G.lines) if ((L.owner ?? 1) === cid) v += L.fleet * vehCost(L) * 0.5;
   return v;
 }
