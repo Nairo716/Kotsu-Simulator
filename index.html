@@ -423,10 +423,12 @@ function processTile(x, y, L) {
       lu.push({ cls: pr.class, rr, bb: [x0, y0, x1, y1], ext: L.landuse.extent });
     }
   }
-  const B = L.building; if (!B) return;
-  const ext = B.extent;
+  const B = L.building;
+  const ext = B ? B.extent : 4096;
   const latc = tile2lat(y + 0.5);
   const mpu = (40075016.686 * Math.cos(latc * Math.PI / 180) / 2 ** Z) / ext;
+  const fromB = new Map(); // このタイルで、建物から見積もったメッシュごとの人口・従業者
+  if (B)
   for (const F of B.features) {
     if (F.type !== 3) continue;
     const rr = rings(F.geom); if (!rr.length) continue;
@@ -456,6 +458,32 @@ function processTile(x, y, L) {
     else if (cls === 'stadium' || cls === 'theme_park' || cls === 'zoo') ex.attr = floor / 100;
     const lon = tile2lon(x + cx / ext), lat = tile2lat(y + cy / ext);
     addCell(lat, lon, pop, jobs, ex);
+    const k = Math.floor(lat / LAT_STEP) + '_' + Math.floor(lon / LON_STEP), v = fromB.get(k) || [0, 0]; v[0] += pop; v[1] += jobs; fromB.set(k, v);
+  }
+  // 建物が地図に描かれていない地域（郊外・地方に多い）の補い：土地利用（住宅地・商業地など）の面積から見積もる。
+  // 建物から見積もった人数が、土地利用からの目安の半分に満たないメッシュだけ、足りない分を足す
+  if (!lu.length) return;
+  const LU_DENS = { residential: [6000, 600], commercial: [1500, 9000], retail: [1500, 9000], industrial: [0, 3000] }; // 人/km²（人口, 従業者）
+  const N = 48, step = ext / N, cellA = (step * mpu) ** 2 / 1e6; // 1点あたりの面積（km²）
+  const est = new Map();
+  for (let gy = 0; gy < N; gy++) for (let gx = 0; gx < N; gx++) {
+    const px0 = (gx + 0.5) * step, py0 = (gy + 0.5) * step;
+    let cls = null;
+    for (const u of lu) {
+      if (!LU_DENS[u.cls]) continue;
+      const sc = u.ext / ext, px = px0 * sc, py = py0 * sc;
+      if (px < u.bb[0] || px > u.bb[2] || py < u.bb[1] || py > u.bb[3]) continue;
+      if (pip(px, py, u.rr)) { cls = u.cls; if (cls !== 'residential') break; }
+    }
+    if (!cls) continue;
+    const lat = tile2lat(y + py0 / ext), lon = tile2lon(x + px0 / ext), k = Math.floor(lat / LAT_STEP) + '_' + Math.floor(lon / LON_STEP);
+    let e = est.get(k); if (!e) est.set(k, e = { lat, lon, pop: 0, jobs: 0, shop: 0 });
+    e.pop += LU_DENS[cls][0] * cellA; e.jobs += LU_DENS[cls][1] * cellA; if (cls !== 'industrial') e.shop += LU_DENS[cls][1] * cellA * (cls === 'residential' ? 0.5 : 1);
+  }
+  for (const [k, e] of est) {
+    const b = fromB.get(k) || [0, 0];
+    const dp = b[0] < e.pop * 0.5 ? e.pop * 0.8 - b[0] : 0, dj = b[1] < e.jobs * 0.5 ? e.jobs * 0.8 - b[1] : 0;
+    if (dp > 1 || dj > 1) addCell(e.lat, e.lon, Math.max(0, dp), Math.max(0, dj), { shop: dj > 1 ? e.shop * 0.8 : 0 });
   }
 }
 let failed = 0;
