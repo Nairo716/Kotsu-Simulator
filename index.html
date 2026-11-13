@@ -886,7 +886,7 @@ async function computeDemand(m, ver) {
     const W = gr.map(g => mkWork(g, S)), ACC = gr.map(g => new Float64Array(g.N * Q)), HAS = gr.map(g => new Uint8Array(g.N));
     lap('graph');
     const V = [0, 1, 2, 3].map(() => new Float64Array(S)), GK = [0, 1, 1, 1];
-    const board = new Float64Array(S), boardP = new Float64Array(S * NP), boardB = new Float64Array(S * NB);
+    const board = new Float64Array(S), XF = new Float64Array(S), boardP = new Float64Array(S * NP), boardB = new Float64Array(S * NB);
     const rev = new Float64Array(NP), tripsP = new Float64Array(NP);
     const Lr = new Float64Array(lines.length), Lrev = new Float64Array(lines.length), LOAD = new Float64Array(TS * 2), LB = new Float64Array(TS * 2 * NB);
     let ptTrips = 0, railTrips = 0, busTrips = 0, allTrips = 0, realTrips = 0;
@@ -965,7 +965,12 @@ async function computeDemand(m, ver) {
           const x = pe[v], vb = v * Q;
           if (x >= 0) {
             const e = g.E[x], u = g.from[x], ub = u * Q, fa = A[vb];
-            if (e.k === 1) { Lr[e.l] += fa; let r = fa * (e.sur || 0); if (e.bus) { const f = fare[e.co]; r += fa * (f.busMode === 'dist' ? f.busBase : (f.bus ?? 210)); } Lrev[e.l] += r; }
+            if (e.k === 1) {
+              // 乗り換えて乗る人：この駅に、別の路線を降りて（または歩いて）来た経路なら乗り換え。
+              // 行きはこの駅で乗り、帰りは降りた側の駅（歩いて乗り換えたなら歩き始めた駅）で乗る
+              const pu = Wg.pe[u];
+              if (u < S && pu >= 0) { const w = g.k[pu] === 4 ? g.from[pu] : u; XF[u] += fa / 2; XF[w] += fa / 2; }
+              Lr[e.l] += fa; let r = fa * (e.sur || 0); if (e.bus) { const f = fare[e.co]; r += fa * (f.busMode === 'dist' ? f.busBase : (f.bus ?? 210)); } Lrev[e.l] += r; }
             else if (e.k === 3) {
               const sb = segBase[e.l] + e.seg, d0 = e.dir, d1 = 1 - e.dir;
               LOAD[sb * 2 + d0] += A[vb + 1]; LOAD[sb * 2 + d1] += A[vb + 2];
@@ -992,7 +997,7 @@ async function computeDemand(m, ver) {
       const bandCrowd = lb.map((x, k) => Math.max(0, ...x[0], ...x[1]) / (bt[k] * ln.cap || 1));
       res.lines[l] = { riders: Lr[l], revenue: Math.max(0, Lrev[l]), load, cap, maxCrowd: Math.max(0, ...load[0], ...load[1]) / cap, bandCrowd, lb, bandCap: bt.map(x => x * ln.cap) };
     }
-    res.stations = Array.from(board, (b, s) => ({ board: b, byP: Array.from(boardP.subarray(s * NP, s * NP + NP)), byB: Array.from(boardB.subarray(s * NB, s * NB + NB)) }));
+    res.stations = Array.from(board, (b, s) => ({ board: b + XF[s], xfer: XF[s], byP: Array.from(boardP.subarray(s * NP, s * NP + NP)), byB: Array.from(boardB.subarray(s * NB, s * NB + NB)) }));
     Object.assign(res, { rev: Array.from(rev), tripsP: Array.from(tripsP), ptTrips, railTrips, busTrips, allTrips, realTrips });
     lastCtx = { S, fare, st, lines, ratio, groups: GR, groupOf, PTZ, RZ };
     lap('assign');
@@ -3457,11 +3462,14 @@ function panelStation(s) {
   <div class="kv"><div>種類</div><div>${bus ? 'バス停' : s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (s.single ? '・単線' : '') + '駅'}${s.cargo ? '（貨物取扱）' : ''}</div>
   ${!bus && s.lf ? `<div>地価（都心＝100%）</div><div>${Math.round(s.lf * 100)}%</div>` : ''}
   <div>乗車人員（平日）</div><div>${d ? fmtNum(d.board) + '人/日' : '―'}</div>
+  ${d && d.xfer >= 1 ? `<div>うち乗り換え</div><div>${fmtNum(d.xfer)}人/日</div>` : ''}
   <div>${bus ? 'バス停' : '駅'}勢圏の人口</div><div>${ca ? '約' + fmtNum(ca.pop) + '人' : '読込前'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の従業者</div><div>${ca ? '約' + fmtNum(ca.jobs) + '人' : '読込前'}</div></div>
   <p class="small">${bus ? 'バス停の利用圏は半径600m' : '駅勢圏は駅から半径1.2km（徒歩約20分）'}です。300m以内の駅・バス停とは歩いて乗り換えられます。</p>
+  ${d && d.board < 1 && G.lines.some(L => L.stops.includes(s.id)) ? `<div class="netbox">この${stopWord(s)}を使う人がいません。考えられる理由：${ca && ca.pop + ca.jobs < 300 ? `<b>まわりの人口・従業者が少ない</b>（${bus ? '600m' : '1.2km'}以内に約${fmtNum(ca.pop + ca.jobs)}人。建物データの少ない地域では少なめに出ます）、` : ''}近くのほかの駅・バス停のほうが便利、運転本数が少ない・行き先が少ない、など。</div>` : ''}
   ${(r => G.mode === 'real' ? `<div class="netbox">${r ? `既存の鉄道の「${esc(r.name)}」が${fmtKm(r.d)}先にあり、競合します。` : '近く（1.2km以内）に既存の鉄道の駅はありません。この駅のまわりの人は、既存の鉄道を使えません。'}</div>` : '')(nearestReal(s.lng, s.lat))}
   ${(ap => ap ? `<div class="netbox">${ap.name}の${hav([ap.lng, ap.lat], [s.lng, s.lat]) <= (bus ? 600 : 1200) ? 'アクセス' : '近く'}（${fmtKm(hav([ap.lng, ap.lat], [s.lng, s.lat]))}）。空港の利用者は1日約${fmtMan(ap.pax * 1e6 / 365 * 0.9)}人。${hav([ap.lng, ap.lat], [s.lng, s.lat]) <= (bus ? 600 : 1200) ? '' : `<br>空港客を乗せるには、ターミナルから${bus ? '600m' : '1.2km'}以内に置いてください。`}</div>` : '')(nearAirport(s.lng, s.lat, 2500))}
+  ${d && d.board > 0 && d.xfer >= 1 ? '<p class="small">乗車人員には、ほかの路線から乗り換えて乗る人も含みます（利用目的・時間帯のグラフは、この駅から出発・この駅に到着する人だけです）。</p>' : ''}
   ${d && d.board > 0 ? `<h3>利用目的（平日）</h3>${purposeBlock(d.byP)}<h3>時間帯ごとの乗車</h3>${bandBars(d.byB, '#3b78c3')}` : ''}
   <h3>のりば</h3>
   <div class="list">${lines.map(L => `<div class="item" data-line="${L.id}"><span>${badge(L)} ${esc(L.name)}</span></div>`).join('') || '<span class="small">なし</span>'}</div>
