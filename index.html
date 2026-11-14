@@ -3108,6 +3108,11 @@ const isNode = s => !!s && s.kind === 'node'; // 分岐点（駅のない線路�
 function stationNear(pt, px = 16, kind, own) {
   let best = null, bd = px;
   for (const s of G.stations) { if (kind ? !kindOk(s, kind) : isNode(s)) continue; if (own && !usableBy(s, ui.me)) continue; const p = map.project([s.lng, s.lat]); const d = Math.hypot(p.x - pt.x, p.y - pt.y); if (d < bd) { bd = d; best = s; } }
+  // 丸から外れていても、ホームの四角の上なら その駅
+  if (!best && map.getZoom() >= 14.3 && map.getLayer('pl-fill')) {
+    let hit = []; try { hit = map.queryRenderedFeatures([[pt.x - 3, pt.y - 3], [pt.x + 3, pt.y + 3]], { layers: ['pl-fill'] }); } catch (e) { }
+    for (const f of hit) { const s = stById(f.properties.id); if (!s || (kind ? !kindOk(s, kind) : isNode(s)) || (own && !usableBy(s, ui.me))) continue; best = s; break; }
+  }
   return best;
 }
 function buildStation(e) {
