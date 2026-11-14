@@ -2558,6 +2558,7 @@ function initWorker(tileUrl) {
       const r = m.res, ids = lastReq.stationIds, lids = lastReq.lineIds;
       demand = { rev: r.rev, tripsP: r.tripsP, ptTrips: r.ptTrips, railTrips: r.railTrips, busTrips: r.busTrips, allTrips: r.allTrips, realTrips: r.realTrips || 0, icTrips: r.icTrips || 0, icRiders: r.icRiders || 0, st: new Map(), ln: new Map() };
       r.stations.forEach((s, i) => demand.st.set(ids[i], s));
+      groupStations(demand);
       demand.svc = new Map();
       r.lines.forEach((l, i) => { const x = lastReq.svc[i]; demand.svc.set(x.lid + ':' + x.si, l); });
       // 種別ごとの結果を、路線の区間（駅と駅の間）にまとめて混雑率を出す
@@ -2853,7 +2854,7 @@ function renderNetwork() {
 }
 // 駅のホーム：線路の向きに合わせた長方形。長さは止まる列車のいちばん長い編成（1両20m）、幅は止まる路線の数で広げる
 function renderPlatforms(mark) {
-  const feats = [], done = new Set();
+  const feats = [], done = new Set(), cen = new Map(); // cen：ホームの真ん中（連絡通路はここどうしを結んで描く）
   const use = new Map(); // 駅ID → [{ang, cars, lid}]
   for (const L of G.lines) {
     if (!onTrack(L)) continue; const d = LD.get(L.id); if (!d) continue;
@@ -2887,6 +2888,7 @@ function renderPlatforms(mark) {
         const deg = stDeg(s.id), L0 = Math.min(len, pd.len);
         const a0 = deg <= 1 ? (at < pd.len / 2 ? 0 : pd.len - L0) : Math.max(0, Math.min(at - L0 / 2, pd.len - L0));
         ring = stripPoly(sliceLine(pd, a0, a0 + L0), wid, s.lat);
+        if (ring && !cen.has(s.id)) cen.set(s.id, pointAt(pd, a0 + L0 / 2));
       }
       if (!ring) {
         const ux = Math.cos(g.ang), uy = Math.sin(g.ang), vx = -uy, vy = ux;
@@ -2907,7 +2909,7 @@ function renderPlatforms(mark) {
     xf.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
   }
   // 地図には、自動の乗り換え判定（300m）ではなく、作った連絡通路だけを描く
-  map.getSource('xfers').setData({ type: 'FeatureCollection', features: (G.passages || []).map(q => { const A = stById(q.a), B = stById(q.b); return A && B ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[A.lng, A.lat], [B.lng, B.lat]] } } : null; }).filter(Boolean) });
+  map.getSource('xfers').setData({ type: 'FeatureCollection', features: (G.passages || []).map(q => { const A = stById(q.a), B = stById(q.b), P = s => cen.get(s.id) || [s.lng, s.lat]; return A && B ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [P(A), P(B)] } } : null; }).filter(Boolean) });
   return done;
 }
 function renderPreview() {
@@ -4134,8 +4136,8 @@ function onMove(e) {
   let apf = null; if (!s) try { apf = map.queryRenderedFeatures(e.point, { layers: ['ap-circle'] })[0]; } catch (err) { }
   if (apf) { const a = AIRPORTS[apf.properties.i]; html = `<b>${a.name}</b><br>年間 約${fmtNum(a.pax * 100)}万人が利用<br>1日 約${fmtMan(a.pax * 1e6 / 365 * 0.9)}人が空港へ出入り`; }
   else if (s) {
-    const d = demand?.st.get(s.id);
-    html = `<b>${esc(s.name)}</b><br>${d ? `乗車 ${fmtNum(d.board)}人/日` : '路線なし'}`;
+    const d = stD(s.id), g = grpOf(s.id);
+    html = `<b>${esc(s.name)}</b><br>${d ? `乗車 ${fmtNum(d.board)}人/日${g ? `<br><span class="small">（${esc(grpName(s.id))}の合計）</span>` : ''}` : '路線なし'}`;
   } else if (ui.zones.on && ui.zones.data) {
     let f = null; try { f = map.queryRenderedFeatures(e.point, { layers: ['zone-circle'] })[0]; } catch (err) { }
     if (f) { const z = ui.zones.data.zones[f.properties.i]; if (z) { hz = f.properties.i; const t = zsum(z); html = `<b>${esc(z.name)}周辺</b><br>移動 ${fmtNum(t)}人/日<br>公共交通 ${Math.round(zpt(z) * 100)}%・人口 約${fmtMan(z.pop)}人`; } }
@@ -4225,13 +4227,14 @@ function panelStation(s) {
   if (isNode(s)) return `<h2>分岐点</h2><div class="kv"><div>種類</div><div>線路のつなぎ目（駅なし）</div><div>高さ</div><div>${hName(hOf(s))}</div><div>つながる線路</div><div>${G.tracks.filter(t => t.a === s.id || t.b === s.id).length}本</div></div>
     <p class="small">駅のない線路の端・分岐です。「駅を建設」でここをクリックすると、駅にできます（通っている自社の路線はその駅に止まります）。線路の上をクリックしても駅を置けます。</p>
     ${mine(s) ? removeBtn('この分岐点を撤去する') + '<p class="small">線路が2本だけつながっている分岐点は、撤去すると線路が1本につながります。</p>' : ''}`;
-  const d = demand?.st.get(s.id), ca = catchmentOf(s), bus = isBus(s);
+  const d = stD(s.id), ca = catchmentOf(s), bus = isBus(s), grp = grpOf(s.id);
   const lines = G.lines.filter(L => L.stops.includes(s.id)), tr = transfersAt(s.id).filter(L => !lines.includes(L));
   return `<h2>${esc(s.name)}</h2>
   <div class="row"><input id="stName" value="${esc(s.name)}" maxlength="20" style="flex:1"><button class="btn" data-act="renameSt">名前を変更</button></div>
   <div class="kv"><div>種類</div><div>${bus ? 'バス停' : s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (s.single ? '・単線' : '') + '駅・高さ' + hName(hOf(s))}${s.cargo ? '（貨物取扱）' : ''}</div>
   ${!bus && s.lf ? `<div>地価（都心＝100%）</div><div>${Math.round(s.lf * 100)}%</div>` : ''}
   <div>乗車人員（平日）</div><div>${d ? fmtNum(d.board) + '人/日' : '―'}</div>
+  ${grp ? `<div>合算</div><div class="small">連絡通路でつながる${esc(grpName(s.id))}の合計</div>` : ''}
   ${d && d.xfer >= 1 ? `<div>うち乗り換え</div><div>${fmtNum(d.xfer)}人/日</div>` : ''}
   <div>${bus ? 'バス停' : '駅'}勢圏の人口</div><div>${ca ? '約' + fmtNum(ca.pop) + '人' : '読込前'}</div>
   <div>${bus ? 'バス停' : '駅'}勢圏の従業者</div><div>${ca ? '約' + fmtNum(ca.jobs) + '人' : '読込前'}</div></div>
@@ -4258,7 +4261,7 @@ function panelStation(s) {
 }
 // 港・貨物ターミナル
 function panelHub(s) {
-  const lines = G.lines.filter(L => L.stops.includes(s.id)), port = isPort(s), d = demand?.st.get(s.id), f = fdemand?.st.get(s.id);
+  const lines = G.lines.filter(L => L.stops.includes(s.id)), port = isPort(s), d = stD(s.id), f = fdemand?.st.get(s.id);
   return `<h2>${esc(s.name)}</h2>
   <div class="row"><input id="stName" value="${esc(s.name)}" maxlength="20" style="flex:1"><button class="btn" data-act="renameSt">名前を変更</button></div>
   <div class="kv"><div>種類</div><div>${port ? '港（フェリーターミナル）' : 'トラックの貨物ターミナル'}</div>
@@ -4355,7 +4358,7 @@ function lineDiagram(L, r) {
   // 駅の間の混雑率（全種別あわせて）
   let rows = '';
   L.stops.forEach((sid, i) => {
-    const s = stById(sid), d = demand?.st.get(sid);
+    const s = stById(sid), d = stD(sid);
     const marks = `${s.passing && i > 0 && i < n - 1 ? '<span class="mk" title="待避線">◆</span>' : ''}${s.turnback && i > 0 && i < n - 1 ? '<span class="mk" title="折り返し設備">↩</span>' : ''}`;
     const c = i < n - 1 && r ? Math.max(r.load[0][i] || 0, r.load[1][i] || 0) / r.cap * 100 : 0;
     rows += `<div class="drow" style="height:${RH}px"><div class="dname"><span class="nm" data-st="${sid}">${esc(s.name)}</span>${marks}${c >= 1 ? `<div class="sub" style="color:${crowdColor(c)}">↓ 混雑 ${Math.round(c)}%</div>` : ''}</div>
@@ -4525,19 +4528,44 @@ function routeHtml(r) {
   }).join('');
   return `<div class="kv"><div>所要時間</div><div>約${Math.round(r.totalMin)}分</div><div>運賃</div><div>${fmtNum(r.fare)}円</div><div>乗り換え</div><div>${r.transfers}回</div><div>いちばん混む区間</div><div style="color:${crowdColor(r.maxCrowd * 100)}">${Math.round(r.maxCrowd * 100)}%</div></div>${steps}`;
 }
+// 連絡通路でつながっている駅は同じ駅として、乗車人員などを合わせる
+function passGroups() {
+  const par = new Map(), f = x => { while (par.has(x) && par.get(x) !== x) x = par.get(x); return x; };
+  for (const q of G.passages || []) { if (!stById(q.a) || !stById(q.b)) continue; if (!par.has(q.a)) par.set(q.a, q.a); if (!par.has(q.b)) par.set(q.b, q.b); const a = f(q.a), b = f(q.b); if (a !== b) par.set(a, b); }
+  const g = new Map(); for (const id of par.keys()) { const r = f(id); if (!g.has(r)) g.set(r, []); g.get(r).push(id); }
+  const out = new Map(); for (const ms of g.values()) if (ms.length > 1) for (const id of ms) out.set(id, ms);
+  return out;
+}
+function groupStations(dm) {
+  dm.gids = passGroups(); dm.grp = new Map();
+  const done = new Set();
+  for (const [id, ms] of dm.gids) {
+    if (done.has(ms)) continue; done.add(ms);
+    const c = { board: 0, xfer: 0, byP: null, byB: null, members: ms };
+    for (const m of ms) { const d = dm.st.get(m); if (!d) continue; c.board += d.board || 0; c.xfer += d.xfer || 0;
+      if (d.byP) c.byP = c.byP ? c.byP.map((v, k) => v + (d.byP[k] || 0)) : d.byP.slice(); if (d.byB) c.byB = c.byB ? c.byB.map((v, k) => v + (d.byB[k] || 0)) : d.byB.slice(); }
+    for (const m of ms) dm.grp.set(m, c);
+  }
+}
+// 駅の乗車人員など（連絡通路でつながる駅は合算）
+const stD = id => demand?.grp?.get(id) || demand?.st.get(id);
+const grpOf = id => demand?.gids?.get(id) || null;
+const grpName = id => { const g = grpOf(id); return g ? [...new Set(g.map(x => stById(x)?.name).filter(Boolean))].join('・') : stById(id)?.name || ''; };
 // 駅一覧：乗客の多い順・名前順・地図の中心からの距離順に並べ替えられる
 const SL = { sort: 'pax', who: 'all', kind: 'all' };
 function panelStationList() {
   const c = map.getCenter();
   let list = G.stations.filter(s => (SL.who === 'all' || mine(s)) && (SL.kind === 'all' || (SL.kind === 'bus') === isBus(s)) && G.lines.some(L => L.stops.includes(s.id)));
-  const pax = s => demand?.st.get(s.id)?.board || 0, dist = s => hav([s.lng, s.lat], [c.lng, c.lat]);
+  const pax = s => stD(s.id)?.board || 0, dist = s => hav([s.lng, s.lat], [c.lng, c.lat]);
+  // 連絡通路でつながる駅は1行にまとめる
+  { const seen = new Set(); list = list.filter(s => { const g = grpOf(s.id); if (!g) return true; if (seen.has(g)) return false; seen.add(g); return true; }); }
   list.sort(SL.sort === 'name' ? (a, b) => a.name.localeCompare(b.name, 'ja') : SL.sort === 'dist' ? (a, b) => dist(a) - dist(b) : (a, b) => pax(b) - pax(a));
   const total = list.reduce((a, s) => a + pax(s), 0);
   const tab = (k, v, t) => `<button class="btn ${SL[k] === v ? 'on' : ''}" data-sl="${k}:${v}">${t}</button>`;
   return `<h2>駅一覧</h2>
   <div class="tabs">${tab('who', 'all', '全社')}${tab('who', 'mine', '自社')}　${tab('kind', 'all', 'すべて')}${tab('kind', 'rail', '鉄道')}${tab('kind', 'bus', 'バス')}</div>
   <div class="slhead"><span data-sl="sort:name" class="${SL.sort === 'name' ? 'on' : ''}">名前</span><span data-sl="sort:dist" class="${SL.sort === 'dist' ? 'on' : ''}">距離</span><span data-sl="sort:pax" class="${SL.sort === 'pax' ? 'on' : ''}" style="margin-left:auto">▾ 乗客</span></div>
-  <div class="sllist">${list.slice(0, 300).map(s => `<div class="slrow" data-st="${s.id}"><span class="slname">${esc(s.name)}${SL.sort === 'dist' ? `<span class="small"> ${fmtKm(dist(s))}</span>` : ''}</span><span class="slb">${stopBadges(s.id)}</span><span class="pax">${pax(s) ? fmtMan(pax(s)) : '―'}</span></div>`).join('') || '<span class="small">路線の通っている駅がありません</span>'}</div>
+  <div class="sllist">${list.slice(0, 300).map(s => `<div class="slrow" data-st="${s.id}"><span class="slname">${esc(grpOf(s.id) ? grpName(s.id) : s.name)}${SL.sort === 'dist' ? `<span class="small"> ${fmtKm(dist(s))}</span>` : ''}</span><span class="slb">${stopBadges(s.id)}</span><span class="pax">${pax(s) ? fmtMan(pax(s)) : '―'}</span></div>`).join('') || '<span class="small">路線の通っている駅がありません</span>'}</div>
   <p class="small">${list.length}駅・乗車人員の合計 ${fmtMan(total)}人/日（平日）。乗客は1日の乗車人員です。駅名をクリックするとその駅へ移動します。</p>`;
 }
 function panelRoute() {
@@ -4924,10 +4952,10 @@ function buildNetMapSvg() {
   for (const [, sh] of shape) for (let j = 0; j < sh.length - 1; j++) { const a = sh[j], b = sh[j + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]), k = Math.max(1, Math.ceil(L / 12)); for (let t = 0; t <= k; t++) { const x = a[0] + (b[0] - a[0]) * t / k, y = a[1] + (b[1] - a[1]) * t / k; lineBoxes.push([x - 5, y - 5, x + 5, y + 5]); } }
   const hit = (b, list) => { let c = 0; for (const q of list) if (b[0] < q[2] && b[2] > q[0] && b[1] < q[3] && b[3] > q[1]) c++; return c; };
   const placed = []; let lbSvg = '';
-  const order = [...Array(n).keys()].sort((a, b) => (nodeLines[b].size - nodeLines[a].size) || ((demand?.st.get(lay.ids[b])?.board || 0) - (demand?.st.get(lay.ids[a])?.board || 0)));
+  const order = [...Array(n).keys()].sort((a, b) => (nodeLines[b].size - nodeLines[a].size) || ((stD(lay.ids[b])?.board || 0) - (stD(lay.ids[a])?.board || 0)));
   for (const i of order) {
     const s = st[i], p = P[i], name = s.name.replace(/駅$/, ''), fs = nodeLines[i].size > 1 ? 13 : 12, tw = name.length * fs + 2, th = fs + 3;
-    const pax = NM.pax ? demand?.st.get(s.id)?.board : null, th2 = pax ? th + 12 : th;
+    const pax = NM.pax ? stD(s.id)?.board : null, th2 = pax ? th + 12 : th;
     const R0 = (nodeCnt[i] > 1 ? (nodeCnt[i] - 1) * GAP / 2 + 9 : 9);
     const d = nodeDir[i] || [1, 0], horiz = Math.abs(d[0]) > Math.abs(d[1]);
     const cand = [[R0, 0, 'start'], [-R0, 0, 'end'], [0, -R0, 'middle'], [0, R0, 'middle'], [R0 * .75, -R0 * .75, 'start'], [-R0 * .75, -R0 * .75, 'end'], [R0 * .75, R0 * .75, 'start'], [-R0 * .75, R0 * .75, 'end']];
