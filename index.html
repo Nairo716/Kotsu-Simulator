@@ -1983,6 +1983,18 @@ const CARS = Array.from({ length: 16 }, (_, i) => i + 1); // 1〜16両
 // 編成の両数：路面電車の区間は3両まで、さらに止まる駅のホームの長さ（両数）まで
 const carsOf = L => { const d = LD.get(L.id); let c = L.cars || 10; if (d?.tram) c = Math.min(c, TRAM_CARS); if (d?.plat) c = Math.min(c, d.plat); return c; };
 const stCarsDef = s => s.level === 3 ? 16 : s.level === 2 ? 3 : 10;
+// ホームの長さ（m）：1両20m＋余裕10m。路面電車は短め
+const platLen = (s, cars) => Math.max(30, (cars ?? s.cars ?? stCarsDef(s)) * 20 + 10) * (s.level === 2 ? 0.8 : 1);
+const stDeg = id => { let n = 0; for (const t of G.tracks) n += (t.a === id) + (t.b === id); return n; };
+// ホームが1本の線路のうえで使う長さ：行き止まりの駅は片側に全部、途中の駅は両側に半分ずつ
+const platNeed = (s, deg, cars) => !s || !isRailSt(s) ? 0 : platLen(s, cars) / (deg <= 1 ? 1 : 2);
+// sides = [[線路の長さ, 向こう端の駅のホームが使う長さ], ...]。入るいちばん長い両数（入らなければ0）
+function fitCars(s, sides, upTo) {
+  for (let c = upTo; c >= 1; c--) if (sides.every(([len, o]) => platNeed(s, sides.length, c) + o <= len + 2)) return c;
+  return 0;
+}
+const sidesOf = (s, plus = 0) => G.tracks.filter(t => t.a === s.id || t.b === s.id).map(t => { const o = stById(t.a === s.id ? t.b : t.a); return [t.len, platNeed(o, stDeg(o?.id))]; });
+const maxCarsFit = s => { const sd = sidesOf(s); return sd.length ? fitCars(s, sd, 16) : 16; };
 // 1編成（バスは1台）の定員・値段、1編成キロあたりの運行費。鉄道は両数で変わる
 const vehCap = L => isRail(L) ? carsOf(L) * (isHsr(L) ? HSR.carCap : RAIL.carCap) : spec(L).cap;
 const vehCost = L => isRail(L) ? carsOf(L) * (isHsr(L) ? HSR.carCost : RAIL.carCost) : spec(L).vehicle;
@@ -2002,6 +2014,7 @@ function newCompany(id, name, slot) {
   return { id, name: name || '首都圏新交通', color: CO_COLORS[slot % CO_COLORS.length], money: G?.startMoney ?? 1e11, fare: defaultFare(), hist: [], lineNo: 1, busNo: 1 };
 }
 function newGame(mode, company, region, money) {
+  UNDO.past.length = UNDO.future.length = 0; AUTO_NAMES.clear();
   G = { v: 4, passages: [], mode, region, t: 6 * 3600, day: 0, companies: [], stations: [], tracks: [], lines: [], nid: 2, startMoney: money || 1e11, idle: true, idleMax: 30 };
   G.companies.push(newCompany(1, company, 0)); ui.me = 1;
   LD.clear(); demand = null; fdemand = null;
@@ -2439,7 +2452,7 @@ function initWorker(tileUrl) {
         } else if (rn && isBus(s) && m.real.d <= 200) nm = busStopName(s, null, rn + '駅前');
         else if (!m.name) return;
         else nm = isBus(s) ? busStopName(s, m.names || m.name) : kindName(s) ? simpleName(rn && m.real.d <= 300 && isPort(s) ? rn : m.name, kindName(s), s) : uniqueName(m.name, s, [s.lng, s.lat]);
-        if (nm !== s.name) { s.name = nm; renderNetwork(); renderPanel(); NET.sync(); }
+        if (nm !== s.name) { s.name = nm; AUTO_NAMES.set(s.id, nm); renderNetwork(); renderPanel(); NET.sync(); }
       }
     }
     else if (m.type === 'censusOk') { setStatus(`統計データ ${fmtNum(m.n)}メッシュを使用中`); requestDemand(); }
@@ -2764,7 +2777,7 @@ function renderPlatforms(mark) {
     L.stops.forEach((id, i) => {
       const at = d.stopDist[i], a = pointAt(d, Math.max(0, at - 40)), b = pointAt(d, Math.min(d.len, at + 40));
       const ang = Math.atan2((b[1] - a[1]) * 110540, (b[0] - a[0]) * 111320 * Math.cos(b[1] * Math.PI / 180));
-      if (!use.has(id)) use.set(id, []); use.get(id).push({ ang, cars: L.mode === 'freight' ? 12 : carsOf(L), lid: L.id });
+      if (!use.has(id)) use.set(id, []); use.get(id).push({ ang, cars: L.mode === 'freight' ? 12 : carsOf(L), lid: L.id, d, at });
     });
   }
   for (const s of G.stations) {
@@ -2779,14 +2792,24 @@ function renderPlatforms(mark) {
     const groups = [];
     for (const u of list) {
       const g = groups.find(g => { let da = Math.abs(((u.ang - g.ang) % Math.PI + Math.PI) % Math.PI); da = Math.min(da, Math.PI - da); return da < 0.44; });
-      if (g) { g.cars = Math.max(g.cars, u.cars); g.lines.add(u.lid); } else groups.push({ ang: u.ang, cars: u.cars, lines: new Set([u.lid]) });
+      if (g) { g.cars = Math.max(g.cars, u.cars); g.lines.add(u.lid); if (!g.d && u.d) { g.d = u.d; g.at = u.at; } } else groups.push({ ang: u.ang, cars: u.cars, lines: new Set([u.lid]), d: u.d, at: u.at });
     }
     const kx = 111320 * Math.cos(s.lat * Math.PI / 180), ky = 110540;
     for (const g of groups) {
-      const pc = s.cars || g.cars, len = Math.max(30, pc * 20 + 10) * (s.level === 2 ? 0.8 : 1), wid = 14 + 9 * Math.max(0, g.lines.size - 1) + (s.passing ? 8 : 0);
-      const ux = Math.cos(g.ang), uy = Math.sin(g.ang), vx = -uy, vy = ux;
-      const P = (a, b) => [s.lng + (ux * a + vx * b) / kx, s.lat + (uy * a + vy * b) / ky];
-      const ring = [P(-len / 2, -wid / 2), P(len / 2, -wid / 2), P(len / 2, wid / 2), P(-len / 2, wid / 2)]; ring.push(ring[0]);
+      const pc = s.cars || g.cars, len = platLen(s, pc), wid = 14 + 9 * Math.max(0, g.lines.size - 1) + (s.passing ? 8 : 0);
+      // 線路の形に沿わせる：路線（なければつながる線路）の経路を、駅を中心にホームの長さだけ切り出して太らせる
+      let pd = g.d, at = g.at; if (!pd) { const tp = trackPathAt(s); if (tp) { pd = tp.d; at = tp.at; } }
+      let ring;
+      if (pd && pd.len > 1) {
+        const deg = stDeg(s.id), L0 = Math.min(len, pd.len);
+        const a0 = deg <= 1 ? (at < pd.len / 2 ? 0 : pd.len - L0) : Math.max(0, Math.min(at - L0 / 2, pd.len - L0));
+        ring = stripPoly(sliceLine(pd, a0, a0 + L0), wid, s.lat);
+      }
+      if (!ring) {
+        const ux = Math.cos(g.ang), uy = Math.sin(g.ang), vx = -uy, vy = ux;
+        const P = (a, b) => [s.lng + (ux * a + vx * b) / kx, s.lat + (uy * a + vy * b) / ky];
+        ring = [P(-len / 2, -wid / 2), P(len / 2, -wid / 2), P(len / 2, wid / 2), P(-len / 2, wid / 2)]; ring.push(ring[0]);
+      }
       feats.push({ type: 'Feature', properties: { id: s.id, sel: (ui.sel?.type === 'station' && ui.sel.id === s.id) || mark.has(s.id) }, geometry: { type: 'Polygon', coordinates: [ring] } });
     }
     done.add(s.id);
@@ -2837,6 +2860,28 @@ function renderPreview() {
     rf.push({ type: 'Feature', properties: { color: L.color }, geometry: { type: 'LineString', coordinates: sliceLine(d, Math.min(a, b), Math.max(a, b)) } });
   }
   map.getSource('route').setData({ type: 'FeatureCollection', features: rf });
+}
+// 座標の列を、距離で引ける形 {coords, cum, len} にする
+function mkPathD(coords) { const cum = [0]; for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + hav(coords[i - 1], coords[i])); return { coords, cum, len: cum[cum.length - 1] }; }
+// 路線の止まらない駅：つながる線路（2本までをつないだ道）と、その上の駅の位置
+function trackPathAt(s) {
+  const ts = G.tracks.filter(t => t.a === s.id || t.b === s.id); if (!ts.length) return null;
+  const toS = t => t.b === s.id ? t.coords : t.coords.slice().reverse(), fromS = t => t.a === s.id ? t.coords : t.coords.slice().reverse();
+  if (ts.length === 1) return { d: mkPathD(fromS(ts[0])), at: 0 };
+  const c1 = toS(ts[0]), d = mkPathD(c1.concat(fromS(ts[1]).slice(1)));
+  return { d, at: polyLen(c1) };
+}
+// 折れ線を幅 wid(m) の帯（ポリゴンの外周）にする
+function stripPoly(cs, wid, lat) {
+  const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540, P = [];
+  for (const c of cs) { const q = [c[0] * kx, c[1] * ky]; const l = P[P.length - 1]; if (!l || Math.hypot(q[0] - l[0], q[1] - l[1]) > 0.3) P.push(q); }
+  if (P.length < 2) return null;
+  const Lf = [], Rt = [], n = P.length, h = wid / 2;
+  for (let i = 0; i < n; i++) {
+    const a = P[Math.max(0, i - 1)], b = P[Math.min(n - 1, i + 1)], dx = b[0] - a[0], dy = b[1] - a[1], m = Math.hypot(dx, dy) || 1, nx = -dy / m, ny = dx / m;
+    Lf.push([(P[i][0] + nx * h) / kx, (P[i][1] + ny * h) / ky]); Rt.push([(P[i][0] - nx * h) / kx, (P[i][1] - ny * h) / ky]);
+  }
+  const ring = Lf.concat(Rt.reverse()); ring.push(ring[0]); return ring;
 }
 function sliceLine(d, a, b) {
   const out = [pointAt(d, a)];
@@ -3232,16 +3277,26 @@ function simplifyLine(cs, tol) {
   return cs.filter((_, k) => keep[k]);
 }
 // 同じ高さの線路と交差していないか（つながる駅のすぐそば＝分岐・合流は除く）
-function crossingTrack(coords, h, endsLL, exceptIds = []) {
+// 線路の端 sp につながる線路（分岐の元）のID
+function connOf(sp) {
+  if (!sp) return null;
+  if (sp.split != null) return { p: sp.ll, ids: new Set([sp.split]) };
+  const v = sp.id != null ? stById(sp.id) : sp.ll ? G.stations.find(x => (isRailSt(x) || isNode(x)) && hav([x.lng, x.lat], sp.ll) < 3) : null;
+  if (!v) return null;
+  return { p: [v.lng, v.lat], ids: new Set(G.tracks.filter(t => t.a === v.id || t.b === v.id).map(t => t.id)) };
+}
+const BRANCH_ANG = Math.cos(20 * Math.PI / 180), BRANCH_LEN = 600;
+// conn：端でつながる線路。そこから浅い角度（20°以内）で600m以内に分かれていくのは「路線の分岐」として交差扱いしない
+function crossingTrack(coords, h, endsLL, exceptIds = [], conn = []) {
   const kx = 111320 * Math.cos(coords[0][1] * Math.PI / 180), ky = 110540;
   const P = c => [c[0] * kx, c[1] * ky];
   const seg = (p1, p2, p3, p4) => {
     const d1x = p2[0] - p1[0], d1y = p2[1] - p1[1], d2x = p4[0] - p3[0], d2y = p4[1] - p3[1], den = d1x * d2y - d1y * d2x;
     if (Math.abs(den) < 1e-9) return null;
     const t = ((p3[0] - p1[0]) * d2y - (p3[1] - p1[1]) * d2x) / den, u = ((p3[0] - p1[0]) * d1y - (p3[1] - p1[1]) * d1x) / den;
-    return t > 0 && t < 1 && u > 0 && u < 1 ? [p1[0] + d1x * t, p1[1] + d1y * t] : null;
+    return t > 0 && t < 1 && u > 0 && u < 1 ? [p1[0] + d1x * t, p1[1] + d1y * t, Math.abs(d1x * d2x + d1y * d2y) / (Math.hypot(d1x, d1y) * Math.hypot(d2x, d2y) || 1)] : null;
   };
-  const A = coords.map(P), ends = (endsLL || [coords[0], coords[coords.length - 1]]).map(P);
+  const A = coords.map(P), ends = (endsLL || [coords[0], coords[coords.length - 1]]).map(P), cn = (conn || []).filter(Boolean).map(c => ({ p: P(c.p), ids: c.ids }));
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of A) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
   for (const t of G.tracks) {
     if (exceptIds.includes(t.id) || hOf(t) !== h) continue;
@@ -3251,6 +3306,7 @@ function crossingTrack(coords, h, endsLL, exceptIds = []) {
     for (let i = 1; i < A.length; i++) for (let j = 1; j < B.length; j++) {
       const q = seg(A[i - 1], A[i], B[j - 1], B[j]); if (!q) continue;
       if (ends.some(e => Math.hypot(e[0] - q[0], e[1] - q[1]) < 40)) continue; // 駅のすぐそばは分岐・合流
+      if (q[2] > BRANCH_ANG && cn.some(c => c.ids.has(t.id) && Math.hypot(c.p[0] - q[0], c.p[1] - q[1]) < BRANCH_LEN)) continue; // 無理のない線形での分岐
       return t;
     }
   }
@@ -3265,7 +3321,7 @@ function snapTrack(aSpec, bSpec, via = []) {
     setStatus('');
     if (!coords) return toast('近くに実在の線路が見つかりませんでした。チェックを外して手で引いてください');
     coords = round6(simplifyLine(coords, 2));
-    const cx = crossingTrack(coords, h, [[a.lng, a.lat], [s.lng, s.lat]]); if (cx) return toast(crossMsg(cx, h));
+    const cx = crossingTrack(coords, h, [[a.lng, a.lat], [s.lng, s.lat]], [], [connOf(aSpec), connOf(bSpec)]); if (cx) return toast(crossMsg(cx, h));
     const lf = Math.round(((a.lf ?? 1) + (s.lf ?? 1)) / 2 * 100) / 100, minR = polyMinR(coords), c = trackCost(coords, level, single, lf, quad, h);
     if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
     const vmax = level === 2 ? Math.min(TRAM_SPEED, curveSpeed(minR)) : level === 3 ? hsrSpeed(minR) : curveSpeed(minR);
@@ -3340,7 +3396,7 @@ function finishTrack(end) {
   if (ui.snapReal) return snapTrack(d.start, end, d.pts);
   const sm = smoothPath([[A.lng, A.lat], ...d.pts, [B.lng, B.lat]], ui.radius), coords = round6(sm.coords);
   const lv = curLv(), h = ui.level === 2 ? 0 : (ui.h ?? 0);
-  const cx = crossingTrack(coords, h, [[A.lng, A.lat], [B.lng, B.lat]]); if (cx) return toast(crossMsg(cx, h));
+  const cx = crossingTrack(coords, h, [[A.lng, A.lat], [B.lng, B.lat]], [], [connOf(d.start), connOf(end)]); if (cx) return toast(crossMsg(cx, h));
   const lf = Math.round(((A.lf ?? 1) + (B.lf ?? 1)) / 2 * 100) / 100, c = trackCost(coords, lv, ui.single, lf, ui.quad, h);
   if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
   const vmax = ui.level === 2 ? Math.min(TRAM_SPEED, curveSpeed(sm.minR)) : ui.level === 3 ? hsrSpeed(sm.minR) : curveSpeed(sm.minR);
@@ -3558,9 +3614,38 @@ function removeSelected() { const s = ui.sel; if (!s) return; dispatch({ type: '
 // ---------- 変更の適用（ひとり用・ホストはその場で、参加者はホストに送る） ----------
 function dispatch(act) {
   if (NET.role === 'client') { NET.toHost({ t: 'act', act }); return; }
+  const rec = undoOn() && act.type !== 'match', before = rec ? netSnap() : null, m0 = rec ? moneyOf() : null;
   const msg = applyAct(act, ui.me);
+  if (rec) { const after = netSnap(); if (after !== before) { const m1 = moneyOf(); UNDO.past.push({ before, after, dm: G.companies.map(c => [c.id, (m1.get(c.id) || 0) - (m0.get(c.id) || 0)]), what: msg }); if (UNDO.past.length > 60) UNDO.past.shift(); UNDO.future.length = 0; } }
   if (msg) toast(msg);
   afterChange();
+}
+// ---------- 元に戻す（Ctrl+Z）・やり直す（Ctrl+Y） ----------
+// 建設・撤去・設定の変更をまとめて覚えておく。お金は工事費・払い戻しの差額だけを戻す（その間の運賃収入は消えない）
+const UNDO = { past: [], future: [] }, AUTO_NAMES = new Map();
+const undoOn = () => NET.role === 'solo';
+const moneyOf = () => new Map(G.companies.map(c => [c.id, c.money]));
+const netSnap = () => JSON.stringify({ stations: G.stations, tracks: G.tracks, lines: G.lines, passages: G.passages || [], cos: G.companies.map(c => { const { hist, money, token, ...r } = c; return r; }) });
+function restoreSnap(str, dm, sign) {
+  const o = JSON.parse(str);
+  for (const s of o.stations) if (s.autoName && AUTO_NAMES.has(s.id)) s.name = AUTO_NAMES.get(s.id); // あとから付いた駅名はそのまま
+  G.stations = o.stations; G.tracks = o.tracks; G.lines = o.lines; G.passages = o.passages;
+  for (const r of o.cos) { const c = coById(r.id); if (c) Object.assign(c, r); }
+  for (const [id, d] of dm) { const c = coById(id); if (c) c.money += sign * d; }
+}
+function undoRedo(redo) {
+  if (!G) return;
+  if (!undoOn()) return toast('対戦中は「元に戻す」は使えません');
+  const st = redo ? UNDO.future : UNDO.past, e = st.pop();
+  if (!e) return toast(redo ? 'やり直す操作はありません' : '元に戻す操作はありません');
+  restoreSnap(redo ? e.after : e.before, e.dm, redo ? 1 : -1);
+  (redo ? UNDO.past : UNDO.future).push(e);
+  ui.drawing = null;
+  if (ui.sel && !(ui.sel.type === 'station' ? stById(ui.sel.id) : ui.sel.type === 'track' ? tkById(ui.sel.id) : ui.sel.type === 'line' ? lnById(ui.sel.id) : true)) ui.sel = null;
+  if (ui.lineBuild) ui.lineBuild.stops = (ui.lineBuild.stops || []).filter(id => stById(id));
+  afterChange(); updateHint();
+  const w = (e.what || '').split('　')[0].replace(/（.*$/, '');
+  toast(`${redo ? 'やり直しました' : '元に戻しました'}${w ? '：' + w.slice(0, 60) : ''}`);
 }
 function afterChange() {
   rebuildLines(); checkNewLines(); renderNetwork(); renderPreview(); renderPanel(); requestDemand(); NET.sync(); renderDiagram(); renderNetMap();
@@ -3583,6 +3668,14 @@ function applyAct(a, cid) {
       const hh = Math.max(-3, Math.min(3, Math.round(+a.h || 0))), lf = Math.max(0.2, Math.min(1, +a.lf || 1)), c = COST[a.level].st * (a.single ? SINGLE_RATE : 1) * lf * heightMul(hh); if (co.money < c) return '資金が足りません';
       if (a.node != null && !(isNode(stById(a.node)) && own(stById(a.node)))) return null;
       if (a.split != null && !tkById(a.split)) return null;
+      // ホームが線路に収まるか（線路の長さ・となりの駅のホームで決まる）
+      const pseudo = { kind: 'rail', level: a.level }; let fit = stCarsDef(pseudo);
+      if (a.split != null) {
+        const t0 = tkById(a.split), pr = projOnLine(t0.coords, a.ll), d1 = polyLen(t0.coords.slice(0, pr.i).concat([pr.p]));
+        const A = stById(t0.a), B = stById(t0.b);
+        fit = fitCars(pseudo, [[d1, platNeed(A, stDeg(t0.a))], [t0.len - d1, platNeed(B, stDeg(t0.b))]], fit);
+      } else if (a.node != null) { const sd = sidesOf(stById(a.node)); if (sd.length) fit = fitCars(pseudo, sd, fit); }
+      if (!fit) return '線路の長さが足りず、ここにはホームが入りません（となりの駅・分岐点・線路の端から離してください）';
       pay(c);
       const ap = nearAirport(a.ll[0], a.ll[1], 1000);
       // 通っている自社の路線を、あとでこの駅に止める（線路を分ける前の経路で調べる）
@@ -3599,9 +3692,9 @@ function applyAct(a, cid) {
       for (const [L, i] of ins.sort((x, y) => y[1] - x[1])) if (!L.stops.includes(s.id)) L.stops.splice(i + 1, 0, s.id);
       if (a.single) s.single = true;
       if (lf < 1) s.lf = lf;
-      s.h = a.level === 2 ? 0 : hh; s.cars = stCarsDef(s);
+      s.h = a.level === 2 ? 0 : hh; s.cars = fit;
       if (ap) s.autoName = false; // 空港の近くなら「〇〇空港駅」
-      return `${s.name}（${s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (a.single ? '・単線' : '') + '駅・高さ' + hName(s.h)}・ホーム${s.cars}両）を建設しました${ins.length ? `。${[...new Set(ins.map(x => x[0].name))].join('・')}もこの駅に止まります` : ''}　${fmtYen(c)}`;
+      return `${s.name}（${s.level === 2 ? '路面電車の停留場' : COST[s.level].name + (a.single ? '・単線' : '') + '駅・高さ' + hName(s.h)}・ホーム${s.cars}両${s.cars < stCarsDef(s) ? '（線路の長さで決まりました）' : ''}）を建設しました${ins.length ? `。${[...new Set(ins.map(x => x[0].name))].join('・')}もこの駅に止まります` : ''}　${fmtYen(c)}`;
     }
     case 'port': {
       const pc = FERRY.port * econAt(a.ll[0], a.ll[1]).build;
@@ -3627,7 +3720,9 @@ function applyAct(a, cid) {
     case 'rmPassage': { const q = (G.passages || []).find(x => x.id === a.id); if (!q || (q.owner ?? 1) !== cid) return null; G.passages = G.passages.filter(x => x !== q); return '連絡通路を撤去しました'; }
     case 'stCars': {
       const st = stById(a.id); if (!own(st) || !isRailSt(st) || !CARS.includes(a.v)) return null;
-      const old = st.cars || 0, cost = Math.max(0, a.v - Math.max(old, 0)) * stBase(st) * 0.04 * heightMul(hOf(st));
+      const old = st.cars || 0;
+      if (a.v > old) { const mx = maxCarsFit(st); if (a.v > mx) return `線路の長さが足りず、${st.name}のホームは${mx}両までしか延ばせません（となりの駅・分岐点・線路の端までの距離で決まります）`; }
+      const cost = Math.max(0, a.v - Math.max(old, 0)) * stBase(st) * 0.04 * heightMul(hOf(st));
       if (old && a.v <= old) { st.cars = a.v; return `${st.name}のホームを${a.v}両分にしました（止まる列車は${a.v}両までになります）`; }
       if (!pay(cost)) return `ホームの延長に${fmtYen(cost)}かかります。資金が足りません`;
       st.cars = a.v; return `${st.name}のホームを${a.v}両分にしました（${fmtYen(cost)}）`;
@@ -3661,10 +3756,17 @@ function applyAct(a, cid) {
     }
     case 'track': {
       const th = a.level === 2 ? 0 : Math.max(-3, Math.min(3, Math.round(+a.h || 0)));
-      const cx = crossingTrack(a.coords, th, null); if (cx) return crossMsg(cx, th);
+      const cx = crossingTrack(a.coords, th, null, [], [connOf(a.aSpec || (a.a != null ? { id: a.a } : null)), connOf(a.bSpec || (a.b != null ? { id: a.b } : null))]); if (cx) return crossMsg(cx, th);
       if (a.aSpec?.id != null) a.a = a.aSpec.id; if (a.bSpec?.id != null) a.b = a.bSpec.id;
       for (const k of ['a', 'b']) { const x = a[k] != null ? stById(a[k]) : null; if (x && !usableBy(x, cid)) return '乗り入れを許可していない会社の駅には線路をつなげません'; if (x && (a.level === 3) !== (x.level === 3)) return '高速鉄道の線路は高速鉄道の駅どうしだけを結べます'; }
       for (const k of ['aSpec', 'bSpec']) { const t = a[k]?.split != null ? tkById(a[k].split) : null; if (t && (a.level === 3) !== (t.level === 3)) return '高速鉄道の線路と在来線の線路はつなげません'; if (t && !usableBy(t, cid)) return '乗り入れを許可していない会社の線路にはつなげません'; }
+      // 両端の駅のホームが線路に収まるか。途中から分ける線路も、分けたあとの長さで調べる
+      { const endSt = k => a[k] != null ? stById(a[k]) : a[k + 'Spec']?.ll ? G.stations.find(x => isRailSt(x) && hav([x.lng, x.lat], a[k + 'Spec'].ll) < 3) : null;
+        const A = endSt('a'), B = endSt('b'), nA = A ? platNeed(A, stDeg(A.id) + 1) : 0, nB = B ? platNeed(B, stDeg(B.id) + 1) : 0;
+        if (nA + nB > a.len + 2) return `線路が短く、駅のホームが入りません（${[A, B].filter(x => x && isRailSt(x)).map(x => `${x.name} ${x.cars}両`).join('・')}で${Math.round(nA + nB)}m必要・線路は${Math.round(a.len)}m）。線路を長くするか、ホームを短くしてください`;
+        for (const k of ['aSpec', 'bSpec']) { const t = a[k]?.split != null ? tkById(a[k].split) : null; if (!t) continue;
+          const pr = projOnLine(t.coords, a[k].ll), d1 = polyLen(t.coords.slice(0, pr.i).concat([pr.p])), TA = stById(t.a), TB = stById(t.b);
+          if (platNeed(TA, stDeg(t.a)) > d1 + 2 || platNeed(TB, stDeg(t.b)) > t.len - d1 + 2) return '駅のホームにかかる場所では線路を分岐できません。ホームの外で分けてください'; } }
       if (co.money < a.cost) return '資金が足りません';
       if (a.a == null) a.a = resolveEnd(a.aSpec, cid, a.level, th);
       if (a.b == null) a.b = resolveEnd(a.bSpec, cid, a.level, th);
@@ -4023,7 +4125,7 @@ function panelStation(s) {
   ${!bus ? `<div class="row">折り返し：${s.turnback ? '<b>できる</b>（途中駅止まりの列車が折り返せます）' : (mine(s) ? `設備なし <button class="btn" data-act="turnback">折り返し設備を設ける（${fmtYen(stBase(s) * 0.4)}）</button>` : '設備なし')}</div><p class="small">路線の始発・終着駅は設備がなくても折り返せます。</p>` : ''}
   ${!bus ? `<div class="row">待避線：${s.passing ? '<b>あり</b>（優等列車の通過待ちができます）' : (mine(s) && !s.single ? `なし <button class="btn" data-act="passing">待避線を設ける（${fmtYen(stBase(s) * 0.6)}）</button>` : 'なし')}</div>` : ''}
   ${(() => { const ps = (G.passages || []).filter(q => q.a === s.id || q.b === s.id); return `<h3>連絡通路</h3>${ps.length ? `<div class="list">${ps.map(q => { const o = stById(q.a === s.id ? q.b : q.a); return `<div class="item"><span>${esc(o?.name || '')}（${Math.round(q.len)}m）</span>${(q.owner ?? 1) === ui.me ? `<button class="btn danger" data-act="rmPassage" data-pid="${q.id}">撤去</button>` : ''}</div>`; }).join('')}</div>` : '<span class="small">なし</span>'}<p class="small">「連絡通路」ツールで、離れた駅・バス停どうしを通路で結ぶと、歩いて早く乗り換えられます（300mより遠くても可）。</p>`; })()}
-  ${!bus ? `<div class="row">ホームの長さ ${mine(s) ? `<select id="stCars">${CARS.map(c => `<option value="${c}" ${c === (s.cars || 0) ? 'selected' : ''}>${c}両</option>`).join('')}${s.cars ? '' : '<option value="0" selected>制限なし</option>'}</select>` : (s.cars ? s.cars + '両' : '制限なし')}<span class="small">止まる列車はこの両数まで。延ばすと1両あたり${fmtYen(stBase(s) * 0.04 * heightMul(hOf(s)))}</span></div>` : ''}
+  ${!bus ? `<div class="row">ホームの長さ ${mine(s) ? `<select id="stCars">${(mx => CARS.map(c => `<option value="${c}" ${c === (s.cars || 0) ? 'selected' : ''} ${c > mx && c > (s.cars || 0) ? 'disabled' : ''}>${c}両${c > mx && c > (s.cars || 0) ? '（入らない）' : ''}</option>`).join(''))(maxCarsFit(s))}${s.cars ? '' : '<option value="0" selected>制限なし</option>'}</select>` : (s.cars ? s.cars + '両' : '制限なし')}<span class="small">止まる列車はこの両数まで。延ばすと1両あたり${fmtYen(stBase(s) * 0.04 * heightMul(hOf(s)))}</span></div>` : ''}
   ${!bus && s.single ? `<div class="row">単線の駅（1線）：止まる路線は列車の本数が半分です。${mine(s) ? `<button class="btn" data-act="doubleSt">2線の駅にする（${fmtYen(stBase(s) * SINGLE_RATE)}）</button>` : ''}</div>` : ''}
   ${!bus ? `<div class="row">貨物：${s.cargo ? `<b>取り扱いあり</b>${fdemand?.st.get(s.id) ? `（${fmtNum(fdemand.st.get(s.id).tons)}トン/日）` : ''}` : (mine(s) ? `なし <button class="btn" data-act="cargoSt">貨物の取り扱いを始める（${fmtYen(stBase(s) * 0.3)}）</button>` : 'なし')}</div><p class="small">貨物駅にすると、貨物列車・トラック便が発着できます。まわり3kmの事業所・住民から荷物が集まります。</p>` : ''}
   ${bus ? `<div class="netbox">共用のバス停です。どの会社のバスも止まれます（使用料なし）。${(() => { const cs = [...new Set(G.lines.filter(L => L.stops.includes(s.id)).map(L => L.owner ?? 1))].map(c => coById(c)?.name).filter(Boolean); return cs.length ? '使用中：' + cs.map(esc).join('・') : ''; })()}</div>` : ''}
@@ -4920,7 +5022,7 @@ function showStart() {
   $('#continueGame').style.display = loadSaved() ? '' : 'none';
 }
 function startGame(g, me = 1) {
-  G = migrate(g); ui.me = me; applyRegion();
+  G = migrate(g); ui.me = me; applyRegion(); UNDO.past.length = UNDO.future.length = 0; AUTO_NAMES.clear();
   ui.idlePending = 0; ui.idleReport = null; NEWS.list = []; NEWS.known = null; NEWS.prev.clear(); ui.resultShown = false;
   if (NET.role !== 'client' && G.idle !== false && G.savedAt && (G.lastSpeed || 0) > 0) {
     const away = (Date.now() - G.savedAt) / 1000;
@@ -4962,6 +5064,11 @@ $('#colorMode').addEventListener('change', e => { ui.colorMode = e.target.value;
 // 入力が終わったら、待たせていた描き直しをする
 $('#panel').addEventListener('focusout', () => setTimeout(() => { if (ui.panelDirty && !typingIn(document.activeElement)) renderPanel(); }, 0));
 document.addEventListener('keydown', e => {
+  // Ctrl+Z：元に戻す　Ctrl+Y／Ctrl+Shift+Z：やり直す（Macは⌘）
+  if (G && (e.ctrlKey || e.metaKey) && !e.altKey && !e.isComposing && $('#start').style.display === 'none' && !typingIn(e.target) && !typingIn(document.activeElement)) {
+    const k = e.key.toLowerCase();
+    if (k === 'z' || k === 'y') { e.preventDefault(); undoRedo(k === 'y' || e.shiftKey); return; }
+  }
   // 文字入力中（日本語の変換中を含む）や、Ctrl・⌘・Altとの組み合わせはショートカットにしない
   if (!G || e.isComposing || e.keyCode === 229 || e.ctrlKey || e.metaKey || e.altKey) return;
   if (typingIn(e.target) || typingIn(document.activeElement)) return;
