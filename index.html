@@ -419,6 +419,16 @@ function processPOI(x, y, L) {
     }
   }
 }
+function guessFloors(area, cls) {
+  if (area < 160) return 2;                                   // 戸建て
+  if (cls === 'industrial' || cls === 'railway' || cls === 'military') return area < 1500 ? 2 : 1;
+  if (cls === 'commercial' || cls === 'retail') return area < 3000 ? 4 : 3;
+  if (cls === 'residential') return area < 350 ? 3 : area < 3000 ? 5 : 6; // アパート・マンション・団地
+  if (USE[cls]) return area < 3000 ? 3 : 2;                  // 学校・病院など
+  return area < 350 ? 3 : area < 1500 ? 4 : area < 3000 ? 3 : 2; // 区分不明（大きいものは店・工場のことも多い）
+}
+// 道路の種類ごとの、沿道の人口の目安（道路1kmあたりの人）
+const ROAD_POP = { minor: 250, service: 80, tertiary: 150 };
 function processTile(x, y, L) {
   const lu = [];
   if (L.landuse) {
@@ -445,15 +455,17 @@ function processTile(x, y, L) {
     const r0 = rr[0]; let cx = 0, cy = 0; for (const q of r0) { cx += q[0]; cy += q[1]; } cx /= r0.length; cy /= r0.length;
     if (cx < 0 || cx >= ext || cy < 0 || cy >= ext) continue; // タイル境界の重複を除外
     const pr = props(B, F);
-    const h = typeof pr.render_height === 'number' ? pr.render_height : 5;
-    const floors = Math.max(1, Math.round(h / 3.2));
-    const floor = area * floors * 0.85;
     let cls = null;
     for (const u of lu) {
       const s = u.ext / ext, px = cx * s, py = cy * s;
       if (px < u.bb[0] || px > u.bb[2] || py < u.bb[1] || py > u.bb[3]) continue;
       if (pip(px, py, u.rr)) { cls = u.cls; if (cls !== 'residential') break; }
     }
+    // 高さ：日本の地図では高さ・階数の入っていない建物が多い（その場合タイルでは一律5m＝2階扱い）。
+    // そのときは建物の大きさから階数を見当づける（大きな集合住宅・団地が2階建てと数えられて人口が少なくなるのを防ぐ）
+    const hKnown = typeof pr.render_height === 'number' && pr.render_height !== 5;
+    const floors = hKnown ? Math.max(1, Math.round(pr.render_height / 3.2)) : guessFloors(area, cls);
+    const floor = area * floors * 0.85;
     let pop = 0, jobs = 0; const ex = {};
     const use = USE[cls];
     if (use) { if (use[0]) pop = floor / use[0]; if (use[1]) jobs = floor / use[1]; }
@@ -468,8 +480,32 @@ function processTile(x, y, L) {
     addCell(lat, lon, pop, jobs, ex);
     const k = Math.floor(lat / LAT_STEP) + '_' + Math.floor(lon / LON_STEP), v = fromB.get(k) || [0, 0]; v[0] += pop; v[1] += jobs; fromB.set(k, v);
   }
-  // 建物が地図に描かれていない地域（郊外・地方に多い）の補い：土地利用（住宅地・商業地など）の面積から見積もる。
-  // 建物から見積もった人数が、土地利用からの目安の半分に満たないメッシュだけ、足りない分を足す
+  // 建物が地図に描かれていない地域（郊外・地方に多い）の補い：土地利用（住宅地・商業地など）の面積と、
+  // 生活道路の長さ（日本の地図は道路はほぼ揃っている）から見積もる。
+  // 建物から見積もった人数が、目安の半分に満たないメッシュだけ、足りない分を足す
+  const rdEst = new Map();
+  const T = L.transportation;
+  if (T) {
+    const tm = (40075016.686 * Math.cos(latc * Math.PI / 180) / 2 ** Z) / T.extent;
+    for (const F of T.features) {
+      if (F.type !== 2) continue;
+      const pr = props(T, F), rp = ROAD_POP[pr.class]; if (!rp) continue;
+      for (const line of clipLine(rings(F.geom), T.extent)) for (let i = 1; i < line.length; i++) {
+        const a = line[i - 1], b = line[i], len = Math.hypot(b[0] - a[0], b[1] - a[1]) * tm; if (!len) continue;
+        const n = Math.ceil(len / 50); // 長い区間は50mずつに分けて、通るメッシュに割り振る
+        for (let q = 0; q < n; q++) {
+          const u = (q + 0.5) / n, lat = tile2lat(y + (a[1] + (b[1] - a[1]) * u) / T.extent), lon = tile2lon(x + (a[0] + (b[0] - a[0]) * u) / T.extent), k = Math.floor(lat / LAT_STEP) + '_' + Math.floor(lon / LON_STEP);
+          let e = rdEst.get(k); if (!e) rdEst.set(k, e = { lat, lon, pop: 0 });
+          e.pop += rp * len / n / 1000;
+        }
+      }
+    }
+  }
+  for (const [k, e] of rdEst) {
+    if (lu.length) continue; // 土地利用があるタイルは下でまとめて
+    const b = fromB.get(k) || [0, 0];
+    if (b[0] + b[1] * 0.5 < e.pop * 0.5) addCell(e.lat, e.lon, e.pop * 0.8 - b[0], e.pop * 0.1, { shop: e.pop * 0.05 });
+  }
   if (!lu.length) return;
   const LU_DENS = { residential: [6000, 600], commercial: [1500, 9000], retail: [1500, 9000], industrial: [0, 3000] }; // 人/km²（人口, 従業者）
   const N = 48, step = ext / N, cellA = (step * mpu) ** 2 / 1e6; // 1点あたりの面積（km²）
@@ -488,8 +524,11 @@ function processTile(x, y, L) {
     let e = est.get(k); if (!e) est.set(k, e = { lat, lon, pop: 0, jobs: 0, shop: 0 });
     e.pop += LU_DENS[cls][0] * cellA; e.jobs += LU_DENS[cls][1] * cellA; if (cls !== 'industrial') e.shop += LU_DENS[cls][1] * cellA * (cls === 'residential' ? 0.5 : 1);
   }
+  // 道路からの目安の方が大きいメッシュはそちらを使う（住宅地のポリゴンが一部しか描かれていない所）
+  for (const [k, r] of rdEst) { const e = est.get(k); if (!e) est.set(k, { lat: r.lat, lon: r.lon, pop: r.pop, jobs: r.pop * 0.12, shop: r.pop * 0.06, rd: true }); else if (r.pop > e.pop && e.pop > 0) e.pop = r.pop; }
   for (const [k, e] of est) {
     const b = fromB.get(k) || [0, 0];
+    if (e.rd && b[0] + b[1] * 0.5 >= e.pop * 0.5) continue;
     const dp = b[0] < e.pop * 0.5 ? e.pop * 0.8 - b[0] : 0, dj = b[1] < e.jobs * 0.5 ? e.jobs * 0.8 - b[1] : 0;
     if (dp > 1 || dj > 1) addCell(e.lat, e.lon, Math.max(0, dp), Math.max(0, dj), { shop: dj > 1 ? e.shop * 0.8 : 0 });
   }
