@@ -1312,7 +1312,7 @@ async function railRoute(p0, p1, viaA = false, viaB = false) {
   // 経由点はその点に近い線路だけ（200m以内）、駅は400m以内の線路から
   const A = nearRoads(lonToG(p0[0]), latToG(p0[1]), viaA ? 200 : 400, RLW), B = nearRoads(gx1, gy1, viaB ? 200 : 400, RLW);
   if (!A.length || !B.length) return null;
-  const path = roadAstar(A, B, gx1, gy1, RLW, 400000); if (!path) return null;
+  const path = railAstar(A, B, gx1, gy1, RLW, 400000); if (!path) return null;
   const coords = viaA ? [] : [p0];
   for (const id of path) coords.push([gToLon(RLW.x[id]), gToLat(RLW.y[id])]);
   if (!viaB) coords.push(p1);
@@ -1379,6 +1379,42 @@ function roadAstar(starts, ends, gx, gy, RD = RDdef, maxN = 200000) {
   }
   if (bestEnd < 0) return null;
   const path = [bestEnd]; let v = bestEnd; while (prev.has(v)) { v = prev.get(v); path.push(v); }
+  return path.reverse();
+}
+// 実在の線路をたどる探索。列車が走れる線形だけ：進む向きを急に変えない（60°以上の折り返し・スイッチバックをしない）
+function railAstar(starts, ends, gx, gy, RD, maxN = 200000) {
+  const endCost = new Map(ends.map(e => [e.node, e.cost]));
+  const g = new Map(), prev = new Map(), hd = new Map(), h = [], closed = new Set();
+  const H = v => Math.hypot(RD.x[v] - gx, RD.y[v] - gy) * 1.15, MINC = 0.5;
+  // 状態 = (来た頂点, いまの頂点)。hd は最近12mほど以上の区間の向き（短い区間の細かい折れは見ない）
+  const K = (p, u) => p * 16777216 + u;
+  for (const s of starts) { const k = K(16777215, s.node); g.set(k, s.cost); hd.set(k, null); heapPush(h, [s.cost + H(s.node), k]); }
+  let best = Infinity, bestK = -1, n = 0;
+  while (h.length && n++ < maxN) {
+    const [f, k] = heapPop(h); if (f >= best) break; if (closed.has(k)) continue; closed.add(k);
+    const u = k % 16777216, pu = Math.floor(k / 16777216), gu = g.get(k), hu = hd.get(k);
+    if (endCost.has(u) && gu + endCost.get(u) < best) { best = gu + endCost.get(u); bestK = k; }
+    const ux = RD.x[u], uy = RD.y[u];
+    const relax = (v, w) => {
+      if (v === pu) return;
+      const dx = RD.x[v] - ux, dy = RD.y[v] - uy, L = Math.hypot(dx, dy) || 1;
+      let nh = hu;
+      if (L >= 20 || !hu) { if (hu && (dx * hu[0] + dy * hu[1]) / L < MINC) return; nh = L >= 20 ? [dx / L, dy / L] : hu; }
+      else if (hu && (dx * hu[0] + dy * hu[1]) / L < -0.2) return;
+      const nk = K(u, v), nv = gu + w;
+      if (nv < (g.get(nk) ?? Infinity)) { g.set(nk, nv); prev.set(nk, k); hd.set(nk, nh); heapPush(h, [nv + H(v), nk]); }
+    };
+    const ad = RD.adj[u]; for (let i = 0; i < ad.length; i += 2) relax(ad[i], ad[i + 1]);
+    if (RD.deg[u] <= 1) {
+      const cx = Math.floor(ux / RG), cy = Math.floor(uy / RG);
+      for (let i = cx - 1; i <= cx + 1; i++) for (let j = cy - 1; j <= cy + 1; j++) {
+        const arr = RD.grid.get(i + ':' + j); if (!arr) continue;
+        for (const v of arr) { if (v === u) continue; const d = Math.hypot(RD.x[v] - ux, RD.y[v] - uy); if (d < 14) relax(v, d * 2 + 2); }
+      }
+    }
+  }
+  if (bestK < 0) return null;
+  const path = []; let k = bestK; while (k != null) { path.push(k % 16777216); k = prev.get(k); }
   return path.reverse();
 }
 async function busRoute(p0, p1) {
@@ -2861,6 +2897,23 @@ function renderPreview() {
   }
   map.getSource('route').setData({ type: 'FeatureCollection', features: rf });
 }
+// 線路の端から出ていく向き（先頭から40mほどの点への単位ベクトル。メートル換算）
+function leaveDir(cs) {
+  const kx = 111320 * Math.cos(cs[0][1] * Math.PI / 180), ky = 110540; let acc = 0, q = cs[cs.length - 1];
+  for (let i = 1; i < cs.length; i++) { acc += hav(cs[i - 1], cs[i]); if (acc >= 40) { q = cs[i]; break; } }
+  const dx = (q[0] - cs[0][0]) * kx, dy = (q[1] - cs[0][1]) * ky, L = Math.hypot(dx, dy) || 1; return [dx / L, dy / L];
+}
+// 線路の途中で折り返していないか（60mほどの間で向きが120°以上変わる所）
+function hasHairpin(cs) {
+  const d = mkPathD(cs); if (d.len < 80) return false;
+  const kx = 111320 * Math.cos(cs[0][1] * Math.PI / 180), ky = 110540;
+  for (let x = 30; x + 30 <= d.len; x += 15) {
+    const p0 = pointAt(d, x - 30), p1 = pointAt(d, x), p2 = pointAt(d, x + 30);
+    const ax = (p1[0] - p0[0]) * kx, ay = (p1[1] - p0[1]) * ky, bx = (p2[0] - p1[0]) * kx, by = (p2[1] - p1[1]) * ky;
+    if ((ax * bx + ay * by) / ((Math.hypot(ax, ay) * Math.hypot(bx, by)) || 1) < -0.5) return true;
+  }
+  return false;
+}
 // 座標の列を、距離で引ける形 {coords, cum, len} にする
 function mkPathD(coords) { const cum = [0]; for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + hav(coords[i - 1], coords[i])); return { coords, cum, len: cum[cum.length - 1] }; }
 // 路線の止まらない駅：つながる線路（2本までをつないだ道）と、その上の駅の位置
@@ -3326,6 +3379,7 @@ function snapTrack(aSpec, bSpec, via = []) {
     setStatus('');
     if (!coords) return toast('近くに実在の線路が見つかりませんでした。チェックを外して手で引いてください');
     coords = round6(simplifyLine(coords, 2));
+    if (hasHairpin(coords)) return toast('実在の線路をたどると途中で折り返す形になってしまいます。経由点をクリックして通る線路を指定するか、チェックを外して手で引いてください');
     const cx = crossingTrack(coords, h, [[a.lng, a.lat], [s.lng, s.lat]], [], [connOf(aSpec), connOf(bSpec)]); if (cx) return toast(crossMsg(cx, h));
     const lf = Math.round(((a.lf ?? 1) + (s.lf ?? 1)) / 2 * 100) / 100, minR = polyMinR(coords), c = trackCost(coords, level, single, lf, quad, h);
     if (myCo().money < c.cost) return toast(`資金が足りません（必要：${fmtYen(c.cost)}）`);
@@ -3765,6 +3819,16 @@ function applyAct(a, cid) {
       if (a.aSpec?.id != null) a.a = a.aSpec.id; if (a.bSpec?.id != null) a.b = a.bSpec.id;
       for (const k of ['a', 'b']) { const x = a[k] != null ? stById(a[k]) : null; if (x && !usableBy(x, cid)) return '乗り入れを許可していない会社の駅には線路をつなげません'; if (x && (a.level === 3) !== (x.level === 3)) return '高速鉄道の線路は高速鉄道の駅どうしだけを結べます'; }
       for (const k of ['aSpec', 'bSpec']) { const t = a[k]?.split != null ? tkById(a[k].split) : null; if (t && (a.level === 3) !== (t.level === 3)) return '高速鉄道の線路と在来線の線路はつなげません'; if (t && !usableBy(t, cid)) return '乗り入れを許可していない会社の線路にはつなげません'; }
+      if (hasHairpin(a.coords)) return '線路が途中で折り返す形になっています。列車が走れる線形にしてください';
+      // 分岐点では、列車がそのまま走り抜けられる向きにしかつなげない（折り返し・スイッチバックになる線形は不可）
+      for (const [k, atStart] of [['a', true], ['b', false]]) {
+        const v = a[k] != null ? stById(a[k]) : a[k + 'Spec']?.ll ? G.stations.find(x => isNode(x) && hav([x.lng, x.lat], a[k + 'Spec'].ll) < 3) : null;
+        if (!v || !isNode(v)) continue;
+        const ts = G.tracks.filter(t => t.a === v.id || t.b === v.id); if (!ts.length) continue;
+        const dn = leaveDir(atStart ? a.coords : a.coords.slice().reverse());
+        if (!ts.some(t => { const de = leaveDir(t.a === v.id ? t.coords : t.coords.slice().reverse()); return dn[0] * de[0] + dn[1] * de[1] < -0.5; }))
+          return `${atStart ? '始点' : '終点'}の分岐点で、つながる線路と折り返す形になります。列車が走り抜けられる向き（もとの線路の先へ続く向き）で引いてください`;
+      }
       // 両端の駅のホームが線路に収まるか。途中から分ける線路も、分けたあとの長さで調べる
       { const endSt = k => a[k] != null ? stById(a[k]) : a[k + 'Spec']?.ll ? G.stations.find(x => isRailSt(x) && hav([x.lng, x.lat], a[k + 'Spec'].ll) < 3) : null;
         const A = endSt('a'), B = endSt('b'), nA = A ? platNeed(A, stDeg(A.id) + 1) : 0, nB = B ? platNeed(B, stDeg(B.id) + 1) : 0;
