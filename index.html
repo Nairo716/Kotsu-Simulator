@@ -3378,7 +3378,14 @@ function snapTrack(aSpec, bSpec, via = []) {
   pending.set(key, coords => {
     setStatus('');
     if (!coords) return toast('近くに実在の線路が見つかりませんでした。チェックを外して手で引いてください');
+    // 駅のない端（地図上の点）は、クリックした点ではなく実在の線路の上に置く（端で線路から外れて曲がらないように）
+    const freeA = aSpec.id == null && aSpec.split == null, freeB = bSpec.id == null && bSpec.split == null;
+    if (freeA && coords.length > 2) coords = coords.slice(1);
+    if (freeB && coords.length > 2) coords = coords.slice(0, -1);
     coords = round6(simplifyLine(coords, 2));
+    if (freeA) { aSpec = { ll: coords[0] }; a.lng = coords[0][0]; a.lat = coords[0][1]; }
+    if (freeB) { const q = coords[coords.length - 1], old = bSpec.ll; bSpec = { ll: q }; s.lng = q[0]; s.lat = q[1];
+      if (ui.drawing && ui.drawing.start.ll && old && ui.drawing.start.ll[0] === old[0] && ui.drawing.start.ll[1] === old[1]) { ui.drawing.start = { ll: q }; renderPreview(); } }
     if (hasHairpin(coords)) return toast('実在の線路をたどると途中で折り返す形になってしまいます。経由点をクリックして通る線路を指定するか、チェックを外して手で引いてください');
     const cx = crossingTrack(coords, h, [[a.lng, a.lat], [s.lng, s.lat]], [], [connOf(aSpec), connOf(bSpec)]); if (cx) return toast(crossMsg(cx, h));
     const lf = Math.round(((a.lf ?? 1) + (s.lf ?? 1)) / 2 * 100) / 100, minR = polyMinR(coords), c = trackCost(coords, level, single, lf, quad, h);
